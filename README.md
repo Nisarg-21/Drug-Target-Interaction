@@ -1,4 +1,4 @@
-# CMA-DTI: A Cross-Modal Attention Framework for Explainable Drug-Target Interaction Prediction
+# CMA-DTI: A Cross-Modal Fusion and Attentive Interaction Network for Explainable Drug-Target Interaction Prediction
 
 [![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/release/python-380/)
 [![PyTorch 1.7+](https://img.shields.io/badge/pytorch-1.7+-ee4c2c.svg)](https://pytorch.org/)
