@@ -22,6 +22,7 @@ Accurate prediction of Drug-Target Interactions (DTI) is a cornerstone of modern
 ## 2. Framework
 
 The overall architecture of CMA-DTI is illustrated below. It consists of four main parts: Feature Encoders, a Drug Internal Cross-Modal Fusion Module, a Drug-Protein Interaction Module, and a Prediction Module.
+[Figure1.tiff](https://github.com/user-attachments/files/23011675/Figure1.tiff)
 
 <img width="6172" height="4252" alt="whiteboard_exported_image-1" src="https://github.com/user-attachments/assets/6a19e7cb-b8e0-4a64-a03a-a6569f3e56bd" />
 
