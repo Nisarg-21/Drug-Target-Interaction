@@ -46,9 +46,16 @@ class Trainer(object):
         self.step = 0
         self.experiment = experiment
 
-        self.best_model = None
+        # iter1 - FIXED (CO-02): hold a deep-copied state_dict rather than a second live CMA.
+        # The old code called type(self.model)(**init_params) on every validation improvement,
+        # which re-loaded ESM-2 650M and ChemBERTa from disk and briefly doubled GPU memory.
+        # iter1 - FIXED (SW-03): best_thred is the operating threshold chosen on the validation
+        # set at the best epoch; the test pass reuses it unchanged instead of fitting its own.
+        self.best_model_state = None
         self.best_epoch = None
         self.best_auroc = 0
+        self.best_thred = 0.5
+        self.last_val_thred = 0.5
 
         self.train_loss_epoch = []
         self.train_model_loss_epoch = []
@@ -127,12 +134,14 @@ class Trainer(object):
             self.val_loss_epoch.append(val_loss)
             self.val_auroc_epoch.append(auroc)
 
+            # iter1 - FIXED (CO-02, SW-03): snapshot the weights by deepcopy, and freeze this
+            # epoch's validation threshold alongside them so test never picks its own.
             if auroc >= self.best_auroc:
-                self.best_model = type(self.model)(**self.model.init_params).to(self.device)
-                self.best_model.load_state_dict(copy.deepcopy(self.model.state_dict()))
+                self.best_model_state = copy.deepcopy(self.model.state_dict())
 
                 self.best_auroc = auroc
                 self.best_epoch = self.current_epoch
+                self.best_thred = self.last_val_thred
                 print(f"New best model found at epoch {self.best_epoch} with AUROC: {self.best_auroc:.4f}")
 
 
@@ -182,12 +191,17 @@ class Trainer(object):
         test_loss = 0
         y_label, y_pred = [], []
 
+        # iter1 - FIXED (CO-02): the best-epoch weights are loaded into the live model for the
+        # test pass and put back afterwards, instead of keeping a second full CMA resident.
+        live_state = None
         if dataloader == "test":
             data_loader = self.test_dataloader
-            model_to_eval = self.best_model if self.best_model else self.model
-            if model_to_eval is None:
+            model_to_eval = self.model
+            if self.best_model_state is None:
                  print("Warning: No model available for testing.")
                  return 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
+            live_state = {k: v.detach().cpu().clone() for k, v in self.model.state_dict().items()}
+            self.model.load_state_dict(self.best_model_state)
         elif dataloader == "val":
             data_loader = self.val_dataloader
             model_to_eval = self.model
@@ -199,8 +213,9 @@ class Trainer(object):
             num_batches = len(data_loader)
             if num_batches == 0:
                  print(f"Warning: {dataloader} dataloader is empty.")
+                 self._restore_live_weights(live_state)   # iter1 - FIXED (CO-02)
                  if dataloader == "test":
-                      return 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.5, 0.0
+                      return 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, self.best_thred, 0.0
                  else:
                       return 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
 
@@ -220,11 +235,14 @@ class Trainer(object):
                 y_label.extend(labels.to("cpu").tolist())
                 y_pred.extend(n.to("cpu").tolist())
 
+        # iter1 - FIXED (CO-02): restore the live (current-epoch) weights after a test pass
+        self._restore_live_weights(live_state)
+
         eval_loss = test_loss / num_batches
         if len(y_label) == 0:
              print(f"Warning: No samples processed in {dataloader} evaluation.")
              if dataloader == "test":
-                  return 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, eval_loss, 0.5, 0.0
+                  return 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, eval_loss, self.best_thred, 0.0
              else:
                   return 0.0, 0.0, eval_loss, 0.0, 0.0, 0.0, 0.0
 
@@ -240,28 +258,23 @@ class Trainer(object):
 
 
         if dataloader == "test":
+            # iter1 - FIXED (SW-03): the threshold is no longer searched on the test set. It is
+            # self.best_thred, selected on validation at the best epoch, applied here unchanged.
+            # F1 is therefore measured at that fixed threshold rather than read off the test ROC.
+            # iter1 - FIXED (SW-01): sensitivity and specificity were transposed below - the old
+            # sensitivity was TN/(TN+FP) and the old specificity was TP/(TP+FN).
             fpr, tpr, thresholds = roc_curve(y_label, y_pred)
             prec_pr_curve, recall_pr_curve, thresholds_pr_curve = precision_recall_curve(y_label, y_pred)
 
-            precision_at_threshold = tpr / (tpr + fpr + 1e-6)
-            f1_at_threshold = 2 * precision_at_threshold * tpr / (tpr + precision_at_threshold + 1e-6)
-
-            valid_f1_at_threshold = f1_at_threshold[:-1] if len(f1_at_threshold) > 1 else f1_at_threshold
-            valid_thresholds = thresholds[:-1] if len(thresholds) > 1 else thresholds
-
-            if valid_f1_at_threshold.size > 0:
-                 thred_optim = valid_thresholds[np.argmax(valid_f1_at_threshold)]
-                 f1_optimal = np.max(valid_f1_at_threshold)
-            else:
-                 thred_optim = 0.5
-                 f1_optimal = f1_05
+            thred_optim = self.best_thred
 
             y_pred_optimal_binary = [1 if prob >= thred_optim else 0 for prob in y_pred]
             cm_optimal = confusion_matrix(y_label, y_pred_optimal_binary)
+            f1_optimal = f1_score(y_label, y_pred_optimal_binary, zero_division=0)
 
             accuracy_optimal = (cm_optimal[0, 0] + cm_optimal[1, 1]) / (sum(sum(cm_optimal)) + 1e-6)
-            sensitivity_optimal = cm_optimal[0, 0] / (cm_optimal[0, 0] + cm_optimal[0, 1] + 1e-6)
-            specificity_optimal = cm_optimal[1, 1] / (cm_optimal[1, 0] + cm_optimal[1, 1] + 1e-6)
+            sensitivity_optimal = cm_optimal[1, 1] / (cm_optimal[1, 0] + cm_optimal[1, 1] + 1e-6)
+            specificity_optimal = cm_optimal[0, 0] / (cm_optimal[0, 0] + cm_optimal[0, 1] + 1e-6)
             precision_optimal = precision_score(y_label, y_pred_optimal_binary, zero_division=0)
 
 
@@ -272,13 +285,52 @@ class Trainer(object):
             return auroc, auprc, f1_optimal, sensitivity_optimal, specificity_optimal, accuracy_optimal, eval_loss, thred_optim, precision_optimal
 
         else:
+            # iter1 - FIXED (SW-03): choose the operating threshold here, on validation. train()
+            # promotes it to self.best_thred whenever this epoch becomes the best one.
+            self.last_val_thred = self._optimal_threshold(y_label, y_pred)
             return auroc, auprc, eval_loss, accuracy_05, precision_05, recall_05, f1_05
+
+    # iter1 - FIXED (SW-03): threshold search, moved out of the test branch so it runs on
+    # validation scores.
+    # iter2 - FIXED (SW-02): prevalence-aware precision, was P=N-assuming.
+    # roc_curve gives rates, not counts: tpr = TP/P and fpr = FP/N. Precision is TP/(TP+FP),
+    # so it must be reconstituted with the actual class counts of the set the threshold is
+    # being selected on - here the validation fold, per SW-03. The old tpr/(tpr+fpr) form is
+    # that expression with P and N cancelled out, which only holds when P == N. On BindingDB
+    # (42.0% positive) it overstated precision and pulled the chosen threshold too low.
+    def _optimal_threshold(self, y_label, y_pred):
+        fpr, tpr, thresholds = roc_curve(y_label, y_pred)
+
+        n_pos = float(np.sum(np.asarray(y_label) == 1))     # P in this validation set
+        n_neg = float(len(y_label) - n_pos)                 # N in this validation set
+
+        precision_at_threshold = (tpr * n_pos) / (tpr * n_pos + fpr * n_neg + 1e-6)
+        f1_at_threshold = 2 * precision_at_threshold * tpr / (tpr + precision_at_threshold + 1e-6)
+
+        # iter2 - FIXED (CO-05): sklearn sentinel is first, not last.
+        # roc_curve prepends a (fpr=0, tpr=0) operating point whose threshold is inf, so the old
+        # [:-1] dropped a genuine threshold and kept the sentinel. When every validation score is
+        # identical roc_curve returns just [inf, score] and that surviving sentinel became the
+        # selected threshold, collapsing every later prediction to negative. The dropped point
+        # predicts nothing positive, so its F1 is always 0 and it can never be the optimum.
+        valid_f1_at_threshold = f1_at_threshold[1:]
+        valid_thresholds = thresholds[1:]
+
+        if valid_f1_at_threshold.size > 0:
+            return float(valid_thresholds[np.argmax(valid_f1_at_threshold)])
+        return 0.5
+
+    # iter1 - FIXED (CO-02): puts the current-epoch weights back after the best-epoch test pass
+    def _restore_live_weights(self, live_state):
+        if live_state is not None:
+            self.model.load_state_dict(live_state)
 
     def save_result(self):
         os.makedirs(self.output_dir, exist_ok=True)
 
-        if self.config["RESULT"]["SAVE_MODEL"] and self.best_model:
-            torch.save(self.best_model.state_dict(),
+        # iter1 - FIXED (CO-02): the best weights are a stored state_dict, not a second live model
+        if self.config["RESULT"]["SAVE_MODEL"] and self.best_model_state is not None:
+            torch.save(self.best_model_state,
                        os.path.join(self.output_dir, f"best_model_epoch_{self.best_epoch}.pth"))
             torch.save(self.model.state_dict(), os.path.join(self.output_dir, f"model_epoch_{self.current_epoch}.pth"))
 
@@ -305,15 +357,15 @@ class Trainer(object):
         with open(train_prettytable_file, "w") as fp:
             fp.write(self.train_table.get_string())
 
+    # iter1 - FIXED (SW-06): ReverseLayerF was applied twice (once with self.alpha, once with the
+    # decayed lambda). Each application negates the gradient, so the two cancelled and no
+    # reversal happened at all. Applied exactly once now, with alpha, as standard CDAN does.
     def _compute_entropy_weights(self, logits):
         entropy = entropy_logits(logits)
         if self.current_epoch >= self.da_init_epoch:
              entropy = ReverseLayerF.apply(entropy, self.alpha)
-             current_lambda = self.da_lambda_decay() if self.current_epoch >= self.da_init_epoch else 0.0
-             entropy = ReverseLayerF.apply(entropy, current_lambda)
-             entropy_w = 1.0 + torch.exp(-entropy)
-        else:
-             entropy_w = 1.0 + torch.exp(-entropy)
+
+        entropy_w = 1.0 + torch.exp(-entropy)
 
         return entropy_w
 
@@ -365,15 +417,16 @@ class Trainer(object):
         for i, (batch_s, batch_t) in enumerate(tqdm(self.train_dataloader, desc=f"Epoch {self.current_epoch} DA Training")):
             self.step += 1
 
-            batch_source_data = batch_s[0]
-            v_d_s, smiles_sequences_s, v_p_s_strings, labels_s = batch_source_data
+            # iter1 - FIXED (C-01, C-02): MultiDataLoader now yields one collated batch per wrapped
+            # loader, so batch_s / batch_t are already the 4-tuples from graph_collate_func. The old
+            # batch_s[0] indexing tried to unpack a single DGLGraph into four names.
+            v_d_s, smiles_sequences_s, v_p_s_strings, labels_s = batch_s
 
             v_d_s = v_d_s.to(self.device)
             labels_s = labels_s.float().to(self.device)
 
 
-            batch_target_data = batch_t[0]
-            v_d_t, smiles_sequences_t, v_p_t_strings, _ = batch_target_data
+            v_d_t, smiles_sequences_t, v_p_t_strings, _ = batch_t
 
 
             v_d_t = v_d_t.to(self.device)
@@ -433,6 +486,16 @@ class Trainer(object):
             self.optim.zero_grad()
 
             v_d_s_fused_aligned, v_p_s_out, f_pooled_s, score_s = self.model(v_d_s, smiles_sequences_s, v_p_s_strings, mode="train")
+
+            # iter1 - FIXED (C-04): the supervised DTI loss was missing outright - model_loss was
+            # read four times below but never assigned (NameError), and labels_s was unpacked and
+            # moved to the device and then never used. This is the classification objective that
+            # total_loss = model_loss + lambda * da_loss is supposed to be built on.
+            if self.n_class == 1:
+                n_s, model_loss = binary_cross_entropy(score_s, labels_s)
+            else:
+                n_s, model_loss = cross_entropy_logits(score_s, labels_s)
+
             softmax_output_s = torch.nn.Softmax(dim=1)(score_s)
 
             v_d_t_fused_aligned, v_p_t_out, f_pooled_t, score_t = self.model(v_d_t, smiles_sequences_t, v_p_t_strings, mode="train")

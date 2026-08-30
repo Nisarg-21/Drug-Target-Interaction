@@ -46,7 +46,7 @@ def set_seed(seed=1000):
         torch.backends.cudnn.benchmark = False
 
 
-def graph_collate_func(list_of_tuples):
+def graph_collate_func(list_of_tuples):  # makes batches of 64
     
     batch_graph = dgl.batch([t[0] for t in list_of_tuples])
     list_smiles = [t[1] for t in list_of_tuples]
@@ -56,7 +56,7 @@ def graph_collate_func(list_of_tuples):
     return batch_graph, list_smiles, list_protein, list_labels
 
 
-def mkdir(path):
+def mkdir(path):    #just correct path removes whitespace and /
     path = path.strip()
     path = path.rstrip("\\")
     is_exists = os.path.exists(path)
@@ -64,7 +64,7 @@ def mkdir(path):
         os.makedirs(path)
 
 
-def integer_label_protein(sequence, max_length=1200):
+def integer_label_protein(sequence, max_length=1200):   # iter1 - DEAD CODE (CO-06): unused, kept intentionally
     """
     Integer encoding for protein string sequence.
     Args:

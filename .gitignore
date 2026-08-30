@@ -1,0 +1,47 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.pyc
+*.egg-info/
+.venv/
+venv/
+
+# --- Secrets / local env ---
+.env
+.env.*
+!.env.example
+
+# --- Model checkpoints and saved run state ---
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+
+# --- Training outputs ---
+result/
+results/
+outputs/
+runs/
+logs/
+*.log
+valid_markdowntable.txt
+test_markdowntable.txt
+train_markdowntable.txt
+
+# --- Scratch / verification workspace ---
+# Throwaway patch + verification scripts and pre-fix backups. These live in the
+# session scratchpad outside this repo, but the rule is here in case they are
+# ever copied in.
+scratchpad/
+
+# --- Data (~233 MB; transferred separately) ---
+# NOTE: datasets/{bindingdb,biosnap}/{random,cluster}/*.csv and full.csv were already
+# committed upstream and remain tracked - a .gitignore entry does not untrack them.
+# This rule keeps NEW data out, notably the generated cold_drug/ and cold_protein/
+# splits, which are reproducible from make_splits.py at a given --seed.
+datasets/
+
+# --- OS cruft ---
+.DS_Store
+Thumbs.db
+desktop.ini

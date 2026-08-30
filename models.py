@@ -30,7 +30,7 @@ def binary_cross_entropy(pred_output, labels):
     loss = loss_fct(n, labels)
     return n, loss
 
-def cross_entropy_logits(linear_output, label, weights=None):
+def cross_entropy_logits(linear_output, label, weights=None): #loss function BCE in two steps of cdan, this part is broken
     class_output = F.log_softmax(linear_output, dim=1)
     n = F.softmax(linear_output, dim=1)[:, 1]
     y_hat = class_output.max(1)[1]
@@ -48,7 +48,7 @@ def cross_entropy_logits(linear_output, label, weights=None):
     return n, loss
 
 
-def entropy_logits(linear_output):
+def entropy_logits(linear_output):   #calculates entropy ,so less confidence get less eightage for clauclating loss
     p = F.softmax(linear_output, dim=1)
     loss_ent = -torch.sum(p * (torch.log(p + 1e-10)), dim=1)
     return loss_ent
@@ -60,6 +60,14 @@ class ProtBertProteinEncoder(nn.Module):
         self.tokenizer = AutoTokenizer.from_pretrained(esm_model_path)
         self.model = AutoModelForMaskedLM.from_pretrained(esm_model_path).to(device).eval()
         self.output_dim = 1280
+
+    # iter1 - FIXED (SW-04): this encoder is frozen, but it is a submodule of CMA, so the
+    # self.model.train() at the top of every training epoch used to recursively flip it back
+    # into train mode and silently switch ESM-2 dropout on during training forward passes -
+    # making the "frozen" features stochastic and different from what eval() later saw.
+    # Pinning train() to eval keeps the encoder deterministic in both phases.
+    def train(self, mode=True):
+        return super().train(False)
 
     def forward(self, protein_sequences):
         encoded_inputs = self.tokenizer(protein_sequences, padding=True, truncation=True, return_tensors='pt',
@@ -81,6 +89,11 @@ class ChemBERTaEncoder(nn.Module):
         self.tokenizer = AutoTokenizer.from_pretrained(chemberta_model_path)
         self.model = AutoModel.from_pretrained(chemberta_model_path).to(device).eval()
         self.output_dim = self.model.config.hidden_size
+
+    # iter1 - FIXED (SW-04): same as ProtBertProteinEncoder - pinned to eval so the parent
+    # CMA.train() cannot re-enable ChemBERTa dropout on the frozen encoder.
+    def train(self, mode=True):
+        return super().train(False)
 
     def forward(self, smiles_sequences):
         encoded_inputs = self.tokenizer(smiles_sequences, padding=True, truncation=True, return_tensors='pt',
@@ -270,7 +283,7 @@ class MLPDecoder(nn.Module):
         return x
 
 
-class SimpleClassifier(nn.Module):
+class SimpleClassifier(nn.Module):                      # iter1 - DEAD CODE (CO-07): unused, kept intentionally
     def __init__(self, in_dim, hid_dim, out_dim, dropout):
         super().__init__()
         layers = [
@@ -286,7 +299,7 @@ class SimpleClassifier(nn.Module):
         return logits
 
 
-class RandomLayer(nn.Module):
+class RandomLayer(nn.Module):                         # cdan
     def __init__(self, input_dim_list, output_dim=256, device=None):
         super().__init__()
         self.input_num = len(input_dim_list)

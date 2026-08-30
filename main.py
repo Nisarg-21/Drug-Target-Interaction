@@ -24,20 +24,37 @@ import warnings, os
 import pandas as pd
 import numpy as np
 
-device = torch.device('cuda:1' if torch.cuda.is_available() else 'cuda' if torch.cuda.is_available() else 'cpu')
-
 parser = argparse.ArgumentParser(description="AttnESM-DTI for DTI prediction")
 parser.add_argument('--cfg', required=True, help="path to config file", type=str)
 parser.add_argument('--data', required=True, type=str, metavar='TASK',
                     help='dataset')
-parser.add_argument('--split', default='random', type=str, metavar='S', help="split task", choices=['random', 'cold', 'cluster'])
+# iter1 - FIXED (C-07, C-08): added cold_drug/cold_protein; dropped the dangling 'cold' choice,
+# which argparse accepted even though no datasets/*/cold directory has ever existed.
+parser.add_argument('--split', default='random', type=str, metavar='S', help="split task",
+                    choices=['random', 'cold_drug', 'cold_protein', 'cluster'])
 parser.add_argument('--num_runs', default=1, type=int, help="Number of independent runs")
 parser.add_argument('--start_seed', default=2048, type=int, help="Starting seed for independent runs")
+# iter1 - FIXED (C-05): encoder checkpoints come from the CLI; they were hardcoded to
+# /home/qinchi/... absolute paths that exist only on the original author's machine.
+parser.add_argument('--esm_path', required=True, type=str,
+                    help="path to the local ESM-2 checkpoint directory")
+parser.add_argument('--chemberta_path', required=True, type=str,
+                    help="path to the local ChemBERTa checkpoint directory")
+# iter1 - FIXED (C-06): optional explicit override, e.g. --device cuda:1 on a multi-GPU host
+parser.add_argument('--device', default=None, type=str,
+                    help="torch device override (default: cuda if available, else cpu)")
 
 args = parser.parse_args()
 
-ESM_LOCAL_MODEL_PATH = "/home/qinchi/test-dti4/esm2_t33_650M_UR50D"
-CHEMBERTA_LOCAL_MODEL_PATH = "/home/qinchi/test-dti3/chemberta_local_model"
+# iter1 - FIXED (C-06): was hardcoded to 'cuda:1', an invalid ordinal on single-GPU hosts
+# (the original ternary's middle branch was unreachable).
+device = torch.device(args.device) if args.device else torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+# iter1 - FIXED (C-03): the CDAN domain discriminator is a 2-way source/target classifier.
+# cross_entropy_logits does log_softmax(dim=1) and indexes [:, 1], so the old 1-logit head
+# raised IndexError and would have produced an identically-zero loss. DECODER.BINARY still
+# sizes the DTI prediction head and the CDAN multilinear map; only the domain head changes.
+DA_DOMAIN_CLASSES = 2
 
 
 def run_single_experiment(cfg, args, device, seed, esm_model_path, chemberta_model_path):
@@ -150,6 +167,7 @@ def run_single_experiment(cfg, args, device, seed, esm_model_path, chemberta_mod
     opt_da = None
     domain_dmm = None
 
+    # iter1 - FIXED (C-03): Discriminator is built with n_class=DA_DOMAIN_CLASSES (2) below.
     if cfg.DA.USE:
         fused_feature_dim_for_da = cfg["PROTEIN"]["ESM_FEATURE_DIM"]
         n_class_for_da = cfg["DECODER"]["BINARY"]
@@ -167,11 +185,11 @@ def run_single_experiment(cfg, args, device, seed, esm_model_path, chemberta_mod
                   torch.nn.init.normal_(random_layer.weight, mean=0, std=1)
                   for param in random_layer.parameters():
                       param.requires_grad = False
-             domain_dmm = Discriminator(input_size=cfg["DA"]["RANDOM_DIM"], n_class=cfg["DECODER"]["BINARY"]).to(device)
+             domain_dmm = Discriminator(input_size=cfg["DA"]["RANDOM_DIM"], n_class=DA_DOMAIN_CLASSES).to(device)
              model.random_layer = random_layer
         else:
              domain_dmm = Discriminator(input_size=cdan_h_dim_for_da,
-                                       n_class=cfg["DECODER"]["BINARY"]).to(device)
+                                       n_class=DA_DOMAIN_CLASSES).to(device)
              model.random_layer = None
 
         opt = torch.optim.Adam(model.parameters(), lr=cfg.SOLVER.LR)
@@ -202,8 +220,9 @@ def run_single_experiment(cfg, args, device, seed, esm_model_path, chemberta_mod
 if __name__ == '__main__':
     s = time()
 
-    esm_local_model_path = ESM_LOCAL_MODEL_PATH
-    chemberta_local_model_path = CHEMBERTA_LOCAL_MODEL_PATH
+    # iter1 - FIXED (C-05): sourced from --esm_path / --chemberta_path
+    esm_local_model_path = args.esm_path
+    chemberta_local_model_path = args.chemberta_path
 
 
     all_results = []
