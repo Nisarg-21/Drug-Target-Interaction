@@ -1,0 +1,44 @@
+# --- Virtual environment ---
+cmadti_env/
+
+# --- Local model checkpoints (downloaded separately) ---
+esm2_model/
+chemberta_model/
+
+# --- Data (~233 MB on disk; transferred separately) ---
+datasets/
+
+# --- Python ---
+__pycache__/
+*.pyc
+*.py[cod]
+
+# --- Model checkpoints / saved run state ---
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+
+# --- Scratch / verification workspace ---
+scratchpad/
+
+# --- Training outputs ---
+result/
+results/
+outputs/
+runs/
+logs/
+*.log
+valid_markdowntable.txt
+test_markdowntable.txt
+train_markdowntable.txt
+
+# --- Secrets ---
+.env
+.env.*
+!.env.example
+
+# --- OS cruft ---
+.DS_Store
+Thumbs.db
+desktop.ini
