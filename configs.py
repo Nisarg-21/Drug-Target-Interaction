@@ -42,6 +42,12 @@ _C.RESULT = CN()
 _C.RESULT.OUTPUT_DIR = "./result"
 _C.RESULT.SAVE_MODEL = True
 
+# ablation-residual: projected-GCN residual on fusion output.
+# Defaults to False so this branch reproduces baseline behaviour exactly until
+# the flag is switched on (see configs/CMA_residual.yaml).
+_C.MODEL = CN()
+_C.MODEL.USE_FUSION_RESIDUAL = False
+
 _C.DA = CN()
 _C.DA.TASK = False
 _C.DA.METHOD = "CDAN"

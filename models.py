@@ -143,6 +143,11 @@ class CMA(nn.Module):
         self.cross_attn_gc = MultiHeadAttentionLayer(input_dim=self.chemberta_feature_dim, num_heads=cross_attn_heads,
                                                     dropout=cross_attn_dropout, device=device)
 
+        # ablation-residual: projected-GCN residual on fusion output. Normalises the
+        # summed branch; unused (and its parameters left untouched by the optimizer)
+        # while MODEL.USE_FUSION_RESIDUAL is False.
+        self.fusion_layernorm = nn.LayerNorm(self.chemberta_feature_dim)
+
         self.fused_nodes_proj_for_protein_attn = nn.Linear(self.chemberta_feature_dim, self.protein_feature_dim)
 
         attention_input_dim = self.protein_feature_dim
@@ -178,6 +183,13 @@ class CMA(nn.Module):
         v_d_fused_nodes, cross_attention_weights = self.cross_attn_gc(
             v_d_graph_proj, v_d_chembl_tokens, v_d_chembl_tokens, mask=cross_attn_mask_bool.unsqueeze(1)
         )
+
+        # ablation-residual: projected-GCN residual on fusion output. v_d_graph_proj and
+        # v_d_fused_nodes are both chemberta-dim, so the add is direct - no projection.
+        # When the flag is off, v_d_fused_nodes passes through exactly as attention
+        # returned it, which is the baseline path.
+        if self.config["MODEL"]["USE_FUSION_RESIDUAL"]:
+            v_d_fused_nodes = self.fusion_layernorm(v_d_graph_proj + v_d_fused_nodes)
 
         v_d_nodes_proj = self.fused_nodes_proj_for_protein_attn(v_d_fused_nodes)
 
