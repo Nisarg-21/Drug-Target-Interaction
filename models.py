@@ -23,6 +23,38 @@ def masked_mean_pooling(x, mask):
     mean_x = sum_x / sum_mask
     return mean_x
 
+# ablation-attn-pooling: learned weighted pooling replacing uniform mean.
+# masked_mean_pooling above weights every real node equally. This scores each node
+# with a small MLP, masks padded nodes to -inf so they take zero softmax weight,
+# and returns the weighted sum. Same input and output shapes as the mean pooler:
+# x is [batch, nodes, dim] and mask is [batch, nodes, 1], output is [batch, dim].
+class AttentionPooling(nn.Module):
+    def __init__(self, input_dim, hidden_dim=None):
+        super().__init__()
+        hidden_dim = hidden_dim or max(1, input_dim // 4)
+        self.scorer = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim),
+            nn.Tanh(),
+            nn.Linear(hidden_dim, 1),
+        )
+
+    def forward(self, x, mask):
+        scores = self.scorer(x)                                  # [batch, nodes, 1]
+
+        if mask.dtype != torch.bool:
+            mask_bool = mask > 0
+        else:
+            mask_bool = mask
+
+        # Padded nodes must not receive weight. Use a large finite negative rather
+        # than -inf so a row that is entirely padded yields zeros instead of NaN.
+        scores = scores.masked_fill(~mask_bool, -1e9)
+        weights = torch.softmax(scores, dim=1)                   # over real nodes
+        weights = weights * mask_bool.to(weights.dtype)          # zero out all-padded rows
+
+        return (x * weights).sum(dim=1)                          # [batch, dim]
+
+
 def binary_cross_entropy(pred_output, labels):
     loss_fct = torch.nn.BCELoss()
     m = nn.Sigmoid()
@@ -151,6 +183,12 @@ class CMA(nn.Module):
         self.bcn = MultiHeadAttentionLayer(input_dim=attention_input_dim, num_heads=ban_heads,
                                            dropout=ban_dropout, device=device)
 
+        # ablation-attn-pooling: learned weighted pooling replacing uniform mean.
+        # Built unconditionally so checkpoints stay comparable across both settings;
+        # unused while MODEL.POOLING is "mean".
+        self.pooling_mode = config["MODEL"]["POOLING"]
+        self.attention_pooling = AttentionPooling(self.protein_feature_dim)
+
         mlp_in_dim = self.protein_feature_dim
         mlp_hidden_dim = config["DECODER"]["HIDDEN_DIM"]
         mlp_out_dim = config["DECODER"]["OUT_DIM"]
@@ -196,7 +234,12 @@ class CMA(nn.Module):
             mask=ban_mask_bool.unsqueeze(1)
         )
 
-        f_pooled = masked_mean_pooling(f_seq, gcn_node_mask)
+        # ablation-attn-pooling: learned weighted pooling replacing uniform mean.
+        # The "mean" arm is the untouched baseline call.
+        if self.pooling_mode == "attention":
+            f_pooled = self.attention_pooling(f_seq, gcn_node_mask)
+        else:
+            f_pooled = masked_mean_pooling(f_seq, gcn_node_mask)
         
         score = self.mlp_classifier(f_pooled)
 

@@ -42,6 +42,13 @@ _C.RESULT = CN()
 _C.RESULT.OUTPUT_DIR = "./result"
 _C.RESULT.SAVE_MODEL = True
 
+# ablation-attn-pooling: learned weighted pooling replacing uniform mean.
+# "mean" is the baseline (masked_mean_pooling); "attention" selects the learned
+# scorer. Defaults to "mean" so this branch reproduces baseline behaviour exactly
+# until the flag is switched (see configs/CMA_pooling.yaml).
+_C.MODEL = CN()
+_C.MODEL.POOLING = "mean"          # one of: "mean", "attention"
+
 _C.DA = CN()
 _C.DA.TASK = False
 _C.DA.METHOD = "CDAN"
