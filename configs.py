@@ -41,6 +41,14 @@ _C.SOLVER.SEED = 2048
 # (cache/esm/, cache/chemberta/). False keeps the original recompute-every-batch path.
 _C.SOLVER.USE_CACHE = False
 
+# ablation-residual: opt-in architecture variants. Every flag defaults to False, which
+# reproduces the baseline model exactly (same parameters, same forward, same numbers).
+_C.ABLATION = CN()
+# Add the original projected GCN node embedding back onto the cross-attention fusion output
+# (residual + LayerNorm). Baseline fusion output is a pure function of the ChemBERTa value
+# vectors - the GCN only supplies the query - so the structural signal is otherwise dropped.
+_C.ABLATION.FUSION_RESIDUAL = False
+
 _C.RESULT = CN()
 _C.RESULT.OUTPUT_DIR = "./result"
 _C.RESULT.SAVE_MODEL = True

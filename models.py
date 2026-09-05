@@ -277,6 +277,14 @@ class CMA(nn.Module):
 
         self.random_layer = None
 
+        # ablation-residual: ABLATION.FUSION_RESIDUAL (default False). Read defensively so a
+        # partial config still constructs, and built LAST so that when the flag is off no
+        # module is created at all - the parameter set, the init RNG stream and therefore
+        # every downstream number are bit-identical to the baseline.
+        self.use_fusion_residual = bool(config.get("ABLATION", {}).get("FUSION_RESIDUAL", False))
+        if self.use_fusion_residual:
+            self.fusion_residual_norm = nn.LayerNorm(self.chemberta_feature_dim)
+
     def forward(self, bg_d, smiles_sequences, protein_sequences, mode="train"):
         v_d_graph_nodes = self.drug_extractor(bg_d)
         batch_num_nodes = bg_d.batch_num_nodes()
@@ -296,6 +304,14 @@ class CMA(nn.Module):
         v_d_fused_nodes, cross_attention_weights = self.cross_attn_gc(
             v_d_graph_proj, v_d_chembl_tokens, v_d_chembl_tokens, mask=cross_attn_mask_bool.unsqueeze(1)
         )
+
+        # ablation-residual: v_d_fused_nodes above is attention(A) @ value(V), and V comes only
+        # from the ChemBERTa tokens - v_d_graph_proj enters solely as the query, so none of the
+        # GCN's structural representation survives into the fused nodes. Adding the projected
+        # GCN embedding back as a residual (then LayerNorm, to keep the scale of the sum in the
+        # range the downstream projection was trained for) preserves that signal.
+        if self.use_fusion_residual:
+            v_d_fused_nodes = self.fusion_residual_norm(v_d_fused_nodes + v_d_graph_proj)
 
         v_d_nodes_proj = self.fused_nodes_proj_for_protein_attn(v_d_fused_nodes)
 
