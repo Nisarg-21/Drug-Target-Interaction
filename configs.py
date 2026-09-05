@@ -41,6 +41,15 @@ _C.SOLVER.SEED = 2048
 # (cache/esm/, cache/chemberta/). False keeps the original recompute-every-batch path.
 _C.SOLVER.USE_CACHE = False
 
+# ablation-attn-pooling: opt-in architecture variants. Every flag defaults to False, which
+# reproduces the baseline model exactly (same parameters, same forward, same numbers).
+_C.ABLATION = CN()
+# Replace the uniform masked-mean pooling over drug nodes with content-weighted (learned
+# attention) pooling before the MLP classifier.
+_C.ABLATION.ATTN_POOLING = False
+# Hidden width of the additive-attention scorer; only read when ATTN_POOLING is True.
+_C.ABLATION.ATTN_POOLING_HIDDEN = 128
+
 _C.RESULT = CN()
 _C.RESULT.OUTPUT_DIR = "./result"
 _C.RESULT.SAVE_MODEL = True

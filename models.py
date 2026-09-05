@@ -25,6 +25,43 @@ def masked_mean_pooling(x, mask):
     mean_x = sum_x / sum_mask
     return mean_x
 
+class AttentionPooling(nn.Module):
+    """Content-weighted pooling over the drug-node axis.
+
+    ablation-attn-pooling: masked_mean_pooling above averages every valid node with equal
+    weight, so a 3-atom fragment and a 60-atom scaffold contribute per-node identically and
+    the interaction vector of the single node that actually drives binding is diluted by all
+    the others. Here a small additive-attention scorer (Bahdanau-style: Linear -> tanh ->
+    Linear-to-scalar) produces one logit per position; the softmax runs over valid positions
+    only, so padded nodes get exactly zero weight and cannot leak into the pooled vector.
+
+    Drop-in for masked_mean_pooling: same (x, mask) signature, same [B, D] output.
+    """
+
+    def __init__(self, in_dim, hidden_dim=128):
+        super().__init__()
+        self.score = nn.Sequential(
+            nn.Linear(in_dim, hidden_dim),
+            nn.Tanh(),
+            nn.Linear(hidden_dim, 1),
+        )
+
+    def forward(self, x, mask):
+        # mask: [B, N, 1], 1 for a real node. Matches masked_mean_pooling's contract, and
+        # accepts either the float or the bool form.
+        if mask.dtype != torch.bool:
+            mask = mask > 0
+
+        logits = self.score(x)                                  # [B, N, 1]
+        # -1e10 rather than -inf: a row whose nodes are all masked would make an all -inf row
+        # softmax to NaN, whereas this degrades to uniform weights over that row. Real batches
+        # always carry at least one node per molecule, so this is only a guard.
+        logits = logits.masked_fill(~mask, -1e10)
+        weights = F.softmax(logits, dim=1)                      # [B, N, 1]
+
+        return (weights * x).sum(dim=1)                         # [B, D]
+
+
 def binary_cross_entropy(pred_output, labels):
     loss_fct = torch.nn.BCELoss()
     m = nn.Sigmoid()
@@ -277,6 +314,17 @@ class CMA(nn.Module):
 
         self.random_layer = None
 
+        # ablation-attn-pooling: ABLATION.ATTN_POOLING (default False). Read defensively so a
+        # partial config still constructs, and built LAST so that when the flag is off no
+        # module is created at all - the parameter set, the init RNG stream and therefore
+        # every downstream number are bit-identical to the baseline.
+        ablation_config = config.get("ABLATION", {})
+        self.use_attn_pooling = bool(ablation_config.get("ATTN_POOLING", False))
+        if self.use_attn_pooling:
+            self.attn_pooling = AttentionPooling(
+                mlp_in_dim, hidden_dim=int(ablation_config.get("ATTN_POOLING_HIDDEN", 128))
+            )
+
     def forward(self, bg_d, smiles_sequences, protein_sequences, mode="train"):
         v_d_graph_nodes = self.drug_extractor(bg_d)
         batch_num_nodes = bg_d.batch_num_nodes()
@@ -314,7 +362,12 @@ class CMA(nn.Module):
             mask=ban_mask_bool.unsqueeze(1)
         )
 
-        f_pooled = masked_mean_pooling(f_seq, gcn_node_mask)
+        # ablation-attn-pooling: uniform mean over valid nodes vs. learned per-node weights.
+        # Both respect gcn_node_mask, so padded nodes contribute nothing either way.
+        if self.use_attn_pooling:
+            f_pooled = self.attn_pooling(f_seq, gcn_node_mask)
+        else:
+            f_pooled = masked_mean_pooling(f_seq, gcn_node_mask)
         
         score = self.mlp_classifier(f_pooled)
 
