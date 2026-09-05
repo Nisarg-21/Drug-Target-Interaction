@@ -144,6 +144,23 @@ class Trainer(object):
                 self.best_thred = self.last_val_thred
                 print(f"New best model found at epoch {self.best_epoch} with AUROC: {self.best_auroc:.4f}")
 
+                # iter2 - crash-safety: until now the only write to disk was save_result() after
+                # the final epoch, so a crash (OOM, preemption, node death) mid-run threw away
+                # every best model the run had found. Persist each new best immediately; the
+                # end-of-run save_result() below is unchanged and still writes its own files.
+                #
+                # Written via a temp file + os.replace() rather than straight to best_model.pth.
+                # This state_dict carries the frozen ESM-2/ChemBERTa weights too, so it is ~2.8 GB
+                # and takes seconds to write; a crash *during* that write would leave a
+                # truncated, unloadable best_model.pth - and would already have destroyed the
+                # previous good one. os.replace() is atomic on POSIX, so the file on disk is
+                # always either the previous best or the new one, never a half-written mix.
+                os.makedirs(self.output_dir, exist_ok=True)
+                best_ckpt_path = os.path.join(self.output_dir, "best_model.pth")
+                tmp_ckpt_path = f"{best_ckpt_path}.tmp"
+                torch.save(self.best_model_state, tmp_ckpt_path)
+                os.replace(tmp_ckpt_path, best_ckpt_path)
+
 
             print('Validation at Epoch ' + str(self.current_epoch) + ' with validation loss ' + str(val_loss),
                   " AUROC " + str(auroc) + " AUPRC " + str(auprc) +

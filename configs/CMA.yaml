@@ -5,8 +5,13 @@ SOLVER:
   LR: 0.00005
   DA_LR: 0.001
   SEED: 42
+  USE_CACHE: True
 DECODER:
   BINARY: 1
+RESULT:
+  # base results directory only; main.py appends <data>_<split> (and seed<N> when
+  # --num_runs > 1) so back-to-back runs never overwrite each other.
+  OUTPUT_DIR: "./result"
 COMET:
   PROJECT_NAME: CMA_Vanilla
   TAG: Non_DA

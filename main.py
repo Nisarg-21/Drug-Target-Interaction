@@ -33,7 +33,14 @@ parser.add_argument('--data', required=True, type=str, metavar='TASK',
 parser.add_argument('--split', default='random', type=str, metavar='S', help="split task",
                     choices=['random', 'cold_drug', 'cold_protein', 'cluster'])
 parser.add_argument('--num_runs', default=1, type=int, help="Number of independent runs")
-parser.add_argument('--start_seed', default=2048, type=int, help="Starting seed for independent runs")
+# iter3 - FIXED (C-11): the default was a hardcoded 2048 that always won, so SOLVER.SEED in the
+# yaml was silently dead. None means "not passed", and the seed then comes from the config;
+# passing --start_seed explicitly still overrides it.
+parser.add_argument('--start_seed', default=None, type=int,
+                    help="Starting seed for independent runs (default: SOLVER.SEED from --cfg)")
+# iter3 - FIXED (C-12): escape hatch for the auto <OUTPUT_DIR>/<data>_<split> layout below.
+parser.add_argument('--output_dir', default=None, type=str,
+                    help="explicit output directory (default: <RESULT.OUTPUT_DIR>/<data>_<split>)")
 # iter1 - FIXED (C-05): encoder checkpoints come from the CLI; they were hardcoded to
 # /home/qinchi/... absolute paths that exist only on the original author's machine.
 parser.add_argument('--esm_path', required=True, type=str,
@@ -57,10 +64,25 @@ device = torch.device(args.device) if args.device else torch.device('cuda' if to
 DA_DOMAIN_CLASSES = 2
 
 
-def run_single_experiment(cfg, args, device, seed, esm_model_path, chemberta_model_path):
-    cfg.merge_from_file(args.cfg)
-    print("Hyperparameters:", dict(cfg))
+def resolve_output_dir(cfg, args, seed):
+    """Give every (dataset, split) its own results folder.
 
+    iter3 - FIXED (C-12): RESULT.OUTPUT_DIR used to be the full, hardcoded destination, so
+    back-to-back runs over different datasets/splits all wrote their checkpoints, metrics and
+    markdown tables into the same directory and silently overwrote each other. It is now the
+    *base* results directory and the per-run leaf is appended here.
+    """
+    if args.output_dir is not None:
+        base = args.output_dir
+    else:
+        base = os.path.join(cfg.RESULT.OUTPUT_DIR, f"{args.data}_{args.split}")
+    # within a sweep each seed needs its own leaf for the same reason
+    return os.path.join(base, f"seed{seed}") if args.num_runs > 1 else base
+
+
+def run_single_experiment(cfg, args, device, seed, esm_model_path, chemberta_model_path):
+    # iter3 - the caller now hands us a fully resolved cfg (yaml merged, OUTPUT_DIR namespaced),
+    # so re-merging args.cfg here would just undo the OUTPUT_DIR it computed.
     torch.cuda.empty_cache()
     warnings.filterwarnings("ignore", message="invalid value encountered in divide")
 
@@ -73,7 +95,8 @@ def run_single_experiment(cfg, args, device, seed, esm_model_path, chemberta_mod
     experiment = None
     print(f"Config yaml: {args.cfg}")
     print(f"Hyperparameters: {dict(cfg)}")
-    print(f"Running on: {device}", end="\n\n")
+    print(f"Running on: {device}")
+    print(f"Writing results to: {cfg.RESULT.OUTPUT_DIR}", end="\n\n")
 
     dataFolder = f'./datasets/{args.data}'
     dataFolder = os.path.join(dataFolder, str(args.split))
@@ -229,9 +252,15 @@ if __name__ == '__main__':
 
 
     for i in range(args.num_runs):
-        current_seed = args.start_seed + i
-
         cfg_for_run = get_cfg_defaults()
+        cfg_for_run.merge_from_file(args.cfg)
+
+        # iter3 - FIXED (C-11): fall back to the config's seed when --start_seed is not given
+        base_seed = args.start_seed if args.start_seed is not None else cfg_for_run.SOLVER.SEED
+        current_seed = base_seed + i
+
+        # iter3 - FIXED (C-12)
+        cfg_for_run.RESULT.OUTPUT_DIR = resolve_output_dir(cfg_for_run, args, current_seed)
 
         single_run_result = run_single_experiment(cfg_for_run,
                                                   args,

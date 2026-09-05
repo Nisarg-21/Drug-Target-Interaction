@@ -37,7 +37,10 @@ class DTIDataset(data.Dataset):         #sets up fuunction for calucalting featu
         # Real atoms already got one from smiles_to_bigraph(add_self_loop=True) above, so they
         # ended up carrying two, skewing GCN degree normalisation. Only the padding nodes added
         # by add_nodes() lack one, so give a self-loop to exactly those and leave the atoms alone.
-        virtual_node_ids = torch.arange(num_actual_nodes, self.max_drug_nodes)
+        # iter2 - FIXED: DGL 2.5 requires int32 node IDs. torch.arange() defaults to int64,
+        # which add_edges() now rejects outright ("Expect argument u to have data type
+        # torch.int32") instead of silently casting as older DGL did.
+        virtual_node_ids = torch.arange(num_actual_nodes, self.max_drug_nodes, dtype=torch.int32)
         v_d.add_edges(virtual_node_ids, virtual_node_ids)
 
         v_p = self.df.iloc[index]['Protein']

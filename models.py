@@ -3,6 +3,8 @@ import torch.nn.functional as F
 import torch
 import math
 import copy
+import os
+import hashlib
 import dgl
 from dgllife.model.gnn import GCN
 from attention import MultiHeadAttentionLayer
@@ -54,12 +56,87 @@ def entropy_logits(linear_output):   #calculates entropy ,so less confidence get
     return loss_ent
 
 
+# feature-cache: on-disk memoisation for the two frozen encoders.
+#
+# ESM-2 and ChemBERTa are both frozen - eval() is pinned by the train() overrides below (the
+# SW-04 fix) and every forward runs under no_grad - so the embedding of a given sequence string
+# is deterministic and identical on every epoch. A DTI dataset repeats each protein and each
+# SMILES across many pairs, so recomputing them per batch is pure waste. These helpers key each
+# sequence by MD5 of its raw string and reuse the saved embedding instead.
+#
+# Caching is per-sequence, but the encoders return a *batched, padded* tensor. So the cached
+# record stores the UNPADDED [L, D] embedding plus its real length L, and _encode_with_cache
+# re-pads the batch here to reproduce exactly the shape, mask and valid-position values that
+# the uncached batch-tokenizer path produces.
+_CACHE_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cache")
+
+
+def _sequence_cache_key(sequence):                                        # feature-cache
+    return hashlib.md5(sequence.encode("utf-8")).hexdigest()
+
+
+def _atomic_torch_save(record, cache_path):                               # feature-cache
+    """Write via a temp file + rename so a crash mid-write cannot leave a half-written .pt
+    that a later run would happily load as a valid embedding."""
+    tmp_path = f"{cache_path}.tmp.{os.getpid()}"
+    torch.save(record, tmp_path)
+    os.replace(tmp_path, cache_path)
+
+
+def _encode_with_cache(sequences, cache_dir, encode_one, device):         # feature-cache
+    """Build (padded_features, attention_mask) from per-sequence cached embeddings.
+
+    encode_one(sequence) -> [L, D] tensor for a single unpadded sequence. Misses are computed
+    with it and written to cache_dir/{md5}.pt as {"features": cpu [L, D], "length": L}.
+
+    Padded positions are filled with zeros. In the uncached path those positions instead hold
+    the encoder's output for the pad token, but they are masked out of every downstream
+    consumer (both MultiHeadAttentionLayer calls masked_fill them to -1e10 before the softmax,
+    which underflows to exactly 0 weight), so the two paths agree everywhere it is read.
+    """
+    os.makedirs(cache_dir, exist_ok=True)
+
+    records = []
+    for sequence in sequences:
+        cache_path = os.path.join(cache_dir, f"{_sequence_cache_key(sequence)}.pt")
+        record = None
+        if os.path.exists(cache_path):
+            try:
+                record = torch.load(cache_path, map_location="cpu", weights_only=True)
+            except Exception:
+                record = None       # unreadable/truncated entry: fall through and recompute
+
+        if record is None:
+            features = encode_one(sequence)
+            record = {"features": features.detach().to("cpu"), "length": int(features.shape[0])}
+            _atomic_torch_save(record, cache_path)
+
+        records.append(record)
+
+    max_len = max(record["length"] for record in records)
+    feature_dim = records[0]["features"].shape[-1]
+    feature_dtype = records[0]["features"].dtype
+
+    padded_features = torch.zeros(len(records), max_len, feature_dim, dtype=feature_dtype,
+                                 device=device)
+    attention_mask = torch.zeros(len(records), max_len, dtype=torch.long, device=device)
+    for i, record in enumerate(records):
+        length = record["length"]
+        padded_features[i, :length] = record["features"].to(device=device, dtype=feature_dtype)
+        attention_mask[i, :length] = 1
+
+    return padded_features, attention_mask
+
+
 class ProtBertProteinEncoder(nn.Module):
-    def __init__(self, esm_model_path, device):
+    def __init__(self, esm_model_path, device, use_cache=False):
         super().__init__()
         self.tokenizer = AutoTokenizer.from_pretrained(esm_model_path)
         self.model = AutoModelForMaskedLM.from_pretrained(esm_model_path).to(device).eval()
         self.output_dim = 1280
+        # feature-cache: off by default - use_cache False reproduces the original path exactly.
+        self.use_cache = use_cache
+        self.cache_dir = os.path.join(_CACHE_ROOT, "esm")
 
     # iter1 - FIXED (SW-04): this encoder is frozen, but it is a submodule of CMA, so the
     # self.model.train() at the top of every training epoch used to recursively flip it back
@@ -69,7 +146,24 @@ class ProtBertProteinEncoder(nn.Module):
     def train(self, mode=True):
         return super().train(False)
 
+    def _encode_one(self, protein_sequence):                              # feature-cache
+        """Run ESM-2 on a single unpadded sequence and return its [L, 1280] embedding."""
+        encoded_inputs = self.tokenizer(protein_sequence, padding=False, truncation=True,
+                                        return_tensors='pt', max_length=512)
+        encoded_inputs = {key: value.to(self.model.device) for key, value in encoded_inputs.items()}
+
+        with torch.no_grad():
+            outputs = self.model(**encoded_inputs, output_hidden_states=True)
+
+        return outputs.hidden_states[-1][0]
+
     def forward(self, protein_sequences):
+        # feature-cache: cached branch re-pads per-sequence embeddings into the same batched
+        # (features, attention_mask) pair the uncached branch below returns.
+        if self.use_cache:
+            return _encode_with_cache(protein_sequences, self.cache_dir, self._encode_one,
+                                      self.model.device)
+
         encoded_inputs = self.tokenizer(protein_sequences, padding=True, truncation=True, return_tensors='pt',
                                         max_length=512)
         encoded_inputs = {key: value.to(self.model.device) for key, value in encoded_inputs.items()}
@@ -84,18 +178,38 @@ class ProtBertProteinEncoder(nn.Module):
 
 
 class ChemBERTaEncoder(nn.Module):
-    def __init__(self, chemberta_model_path, device):
+    def __init__(self, chemberta_model_path, device, use_cache=False):
         super().__init__()
         self.tokenizer = AutoTokenizer.from_pretrained(chemberta_model_path)
         self.model = AutoModel.from_pretrained(chemberta_model_path).to(device).eval()
         self.output_dim = self.model.config.hidden_size
+        # feature-cache: off by default - use_cache False reproduces the original path exactly.
+        self.use_cache = use_cache
+        self.cache_dir = os.path.join(_CACHE_ROOT, "chemberta")
 
     # iter1 - FIXED (SW-04): same as ProtBertProteinEncoder - pinned to eval so the parent
     # CMA.train() cannot re-enable ChemBERTa dropout on the frozen encoder.
     def train(self, mode=True):
         return super().train(False)
 
+    def _encode_one(self, smiles_sequence):                               # feature-cache
+        """Run ChemBERTa on a single unpadded SMILES and return its [L, D] embedding."""
+        encoded_inputs = self.tokenizer(smiles_sequence, padding=False, truncation=True,
+                                        return_tensors='pt', max_length=512)
+        encoded_inputs = {key: value.to(self.model.device) for key, value in encoded_inputs.items()}
+
+        with torch.no_grad():
+            outputs = self.model(**encoded_inputs, output_hidden_states=True)
+
+        return outputs.last_hidden_state[0]
+
     def forward(self, smiles_sequences):
+        # feature-cache: cached branch re-pads per-sequence embeddings into the same batched
+        # (features, attention_mask) pair the uncached branch below returns.
+        if self.use_cache:
+            return _encode_with_cache(smiles_sequences, self.cache_dir, self._encode_one,
+                                      self.model.device)
+
         encoded_inputs = self.tokenizer(smiles_sequences, padding=True, truncation=True, return_tensors='pt',
                                         max_length=512)
         encoded_inputs = {key: value.to(self.model.device) for key, value in encoded_inputs.items()}
@@ -130,10 +244,14 @@ class CMA(nn.Module):
                                            max_nodes=max_drug_nodes)
         self.gcn_feature_dim = drug_hidden_feats[-1]
 
-        self.protein_extractor = ProtBertProteinEncoder(protbert_model_path, device)
+        # feature-cache: SOLVER.USE_CACHE (default False) turns on the on-disk embedding cache
+        # for both frozen encoders. Read defensively so a partial config still constructs.
+        use_cache = bool(config.get("SOLVER", {}).get("USE_CACHE", False))
+
+        self.protein_extractor = ProtBertProteinEncoder(protbert_model_path, device, use_cache=use_cache)
         self.protein_feature_dim = self.protein_extractor.output_dim
 
-        self.chemberta_encoder = ChemBERTaEncoder(chemberta_model_path, device)
+        self.chemberta_encoder = ChemBERTaEncoder(chemberta_model_path, device, use_cache=use_cache)
         self.chemberta_feature_dim = self.chemberta_encoder.output_dim
 
         self.gcn_proj_for_cross_attn = nn.Linear(self.gcn_feature_dim, self.chemberta_feature_dim)

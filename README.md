@@ -93,4 +93,26 @@ To train the CMA-DTI model on a specific dataset and fold, use the `main.py` scr
 
 **Example Command:**
 ```bash
-python main.py --cfg configs/CMA.yaml --data BindingDB --split random
+python main.py --cfg configs/CMA.yaml \
+    --data bindingdb --split random \
+    --esm_path ./esm2_model --chemberta_path ./chemberta_model
+```
+
+`--data` must match a directory name under `./datasets` (`bindingdb`, `biosnap`) and
+`--split` one of `random`, `cold_drug`, `cold_protein`, `cluster`.
+
+**Where results go.** `RESULT.OUTPUT_DIR` in the config is the *base* directory; each run
+gets its own folder underneath it, so running several datasets or splits back to back never
+overwrites earlier results:
+
+```
+./result/<data>_<split>/            # single run, e.g. ./result/biosnap_random/
+./result/<data>_<split>/seed<N>/    # one per seed when --num_runs > 1
+```
+
+Each folder holds the checkpoints (`best_model_epoch_<N>.pth`, `model_epoch_<N>.pth`),
+`result_metrics.pt`, and the `train`/`valid`/`test_markdowntable.txt` score tables.
+Pass `--output_dir` to override the layout entirely.
+
+**Seeding.** The seed comes from `SOLVER.SEED` in the config. `--start_seed` overrides it,
+and with `--num_runs N` the runs use consecutive seeds starting from it.

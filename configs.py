@@ -37,6 +37,9 @@ _C.SOLVER.NUM_WORKERS = 0
 _C.SOLVER.LR = 5e-5
 _C.SOLVER.DA_LR = 1e-3
 _C.SOLVER.SEED = 2048
+# feature-cache: reuse on-disk embeddings for the frozen ESM-2 / ChemBERTa encoders
+# (cache/esm/, cache/chemberta/). False keeps the original recompute-every-batch path.
+_C.SOLVER.USE_CACHE = False
 
 _C.RESULT = CN()
 _C.RESULT.OUTPUT_DIR = "./result"

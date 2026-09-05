@@ -17,6 +17,10 @@ venv/
 *.ckpt
 *.safetensors
 
+# --- Frozen-encoder embedding cache (feature-cache) ---
+# Regenerated on demand from the sequences themselves; large and not worth versioning.
+cache/
+
 # --- Training outputs ---
 result/
 results/
