@@ -287,12 +287,18 @@ class CMA(nn.Module):
 
     def forward(self, bg_d, smiles_sequences, protein_sequences, mode="train"):
         v_d_graph_nodes = self.drug_extractor(bg_d)
-        batch_num_nodes = bg_d.batch_num_nodes()
-        max_gcn_nodes = v_d_graph_nodes.shape[1]
-        node_indices = torch.arange(max_gcn_nodes, device=self.device).unsqueeze(0)
-        batch_node_counts_expanded = batch_num_nodes.unsqueeze(1)
-        gcn_node_mask = (node_indices < batch_node_counts_expanded).to(v_d_graph_nodes.dtype).unsqueeze(-1)
-        gcn_node_mask_bool = gcn_node_mask.bool()
+        # mask-fix: this used to be (arange(max_nodes) < bg_d.batch_num_nodes()). The dataloader
+        # pads every molecule to DRUG.MAX_NODES *before* batching, so batch_num_nodes() returns
+        # max_nodes for every graph and that comparison was unconditionally true: the mask was
+        # all-ones, masked_mean_pooling averaged ~275 padding rows alongside the real atoms, and
+        # the query axis of both attention layers ran from virtual nodes as well as real ones.
+        # The real per-molecule count is only known at graph construction, so the dataloader now
+        # records it per node as ndata['node_mask'] (bool, True for a real atom); it survives
+        # MolecularGCN's ndata.pop('h'). Same [B, N, 1] shape and float/bool pair as before, so
+        # every downstream consumer is unchanged.
+        batch_size, max_gcn_nodes = v_d_graph_nodes.shape[0], v_d_graph_nodes.shape[1]
+        gcn_node_mask_bool = bg_d.ndata['node_mask'].view(batch_size, max_gcn_nodes, 1).to(self.device)
+        gcn_node_mask = gcn_node_mask_bool.to(v_d_graph_nodes.dtype)
 
         v_d_chembl_tokens, chemberta_mask = self.chemberta_encoder(smiles_sequences)
         max_seq_len_c = v_d_chembl_tokens.shape[1]
