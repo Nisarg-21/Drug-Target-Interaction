@@ -43,6 +43,16 @@ class DTIDataset(data.Dataset):         #sets up fuunction for calucalting featu
         virtual_node_ids = torch.arange(num_actual_nodes, self.max_drug_nodes, dtype=torch.int32)
         v_d.add_edges(virtual_node_ids, virtual_node_ids)
 
+        # mask-fix: record which nodes are real atoms. Every graph leaves here padded to exactly
+        # max_drug_nodes, so models.py could not recover this from batch_num_nodes() - that
+        # returns max_drug_nodes for every molecule, making its arange(max) < count comparison
+        # unconditionally true and the resulting mask all-ones. Written after add_nodes() so it
+        # covers all max_drug_nodes rows, and under a key the GCN's ndata.pop('h') leaves alone.
+        v_d.ndata['node_mask'] = torch.cat((
+            torch.ones(num_actual_nodes, dtype=torch.bool),
+            torch.zeros(num_virtual_nodes, dtype=torch.bool),
+        ))
+
         v_p = self.df.iloc[index]['Protein']
         y = self.df.iloc[index]["Y"]
 
