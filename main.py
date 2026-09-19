@@ -50,8 +50,16 @@ parser.add_argument('--chemberta_path', required=True, type=str,
 # iter1 - FIXED (C-06): optional explicit override, e.g. --device cuda:1 on a multi-GPU host
 parser.add_argument('--device', default=None, type=str,
                     help="torch device override (default: cuda if available, else cpu)")
+# iter3 - FIXED (C-13): there was no way to override any config key from the command line;
+# --cfg was the only config input, so every ablation needed a hand-edited yaml. Trailing
+# KEY VALUE pairs are merged over the yaml, e.g.  ... --data biosnap ABLATION.ATTN_POOLING True
+parser.add_argument('opts', default=None, nargs=argparse.REMAINDER,
+                    help="config overrides as trailing KEY VALUE pairs, e.g. ABLATION.ATTN_POOLING True")
 
 args = parser.parse_args()
+
+if args.opts and len(args.opts) % 2 != 0:
+    parser.error(f"config overrides must be KEY VALUE pairs, got an odd number: {args.opts}")
 
 # iter1 - FIXED (C-06): was hardcoded to 'cuda:1', an invalid ordinal on single-GPU hosts
 # (the original ternary's middle branch was unreachable).
@@ -254,6 +262,10 @@ if __name__ == '__main__':
     for i in range(args.num_runs):
         cfg_for_run = get_cfg_defaults()
         cfg_for_run.merge_from_file(args.cfg)
+        # iter3 - FIXED (C-13): CLI overrides win over the yaml. Merged before the seed and
+        # OUTPUT_DIR are read below, so SOLVER.SEED and RESULT.OUTPUT_DIR are overridable too.
+        if args.opts:
+            cfg_for_run.merge_from_list(args.opts)
 
         # iter3 - FIXED (C-11): fall back to the config's seed when --start_seed is not given
         base_seed = args.start_seed if args.start_seed is not None else cfg_for_run.SOLVER.SEED
