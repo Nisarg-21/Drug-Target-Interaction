@@ -49,3 +49,8 @@ datasets/
 .DS_Store
 Thumbs.db
 desktop.ini
+chemberta_model/
+esm2_model/
+cmadti_env/
+__pycache__/
+*.pyc
