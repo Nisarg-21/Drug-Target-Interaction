@@ -51,7 +51,7 @@ _C.ABLATION.FUSION_RESIDUAL = False
 
 _C.RESULT = CN()
 _C.RESULT.OUTPUT_DIR = "./result"
-_C.RESULT.SAVE_MODEL = True
+_C.RESULT.SAVE_MODEL = False
 
 _C.DA = CN()
 _C.DA.TASK = False
