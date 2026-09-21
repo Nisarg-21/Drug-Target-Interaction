@@ -43,7 +43,7 @@ _C.SOLVER.USE_CACHE = False
 
 _C.RESULT = CN()
 _C.RESULT.OUTPUT_DIR = "./result"
-_C.RESULT.SAVE_MODEL = True
+_C.RESULT.SAVE_MODEL = False
 
 _C.DA = CN()
 _C.DA.TASK = False
