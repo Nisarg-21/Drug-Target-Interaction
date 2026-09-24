@@ -10,6 +10,7 @@ from dgllife.model.gnn import GCN
 from attention import MultiHeadAttentionLayer
 from torch.nn.utils.weight_norm import weight_norm
 from transformers import AutoTokenizer, AutoModelForMaskedLM, AutoModel
+from protein_3d import Protein3DEncoder
 
 def masked_mean_pooling(x, mask):
     """Applies mask and then computes mean."""
@@ -248,7 +249,25 @@ class CMA(nn.Module):
         # for both frozen encoders. Read defensively so a partial config still constructs.
         use_cache = bool(config.get("SOLVER", {}).get("USE_CACHE", False))
 
-        self.protein_extractor = ProtBertProteinEncoder(protbert_model_path, device, use_cache=use_cache)
+        # iter4 - 3D-04: PROTEIN.USE_3D swaps the protein encoder for the
+        # cache-backed Protein3DEncoder, which serves ESM-IF1 structure embeddings
+        # (projected 512 -> 1280) with an ESM-2 fallback for proteins that have no
+        # usable AlphaFold model. Read defensively, like USE_CACHE above, so a
+        # config saved before this flag existed still constructs.
+        #
+        # This is a drop-in at the construction site only: both encoders take a
+        # list[str] of sequences and return (features [B, L, 1280], mask [B, L]),
+        # and both expose .output_dim, so protein_feature_dim below and every
+        # downstream consumer in forward() are untouched. USE_3D False leaves the
+        # ESM-2 baseline path exactly as it was.
+        use_3d = bool(config.get("PROTEIN", {}).get("USE_3D", False))
+        if use_3d:
+            esmif1_cache_dir = os.path.join(
+                os.path.dirname(os.path.abspath(__file__)), "cache", "esmif1"
+            )
+            self.protein_extractor = Protein3DEncoder(cache_dir=esmif1_cache_dir, device=device)
+        else:
+            self.protein_extractor = ProtBertProteinEncoder(protbert_model_path, device, use_cache=use_cache)
         self.protein_feature_dim = self.protein_extractor.output_dim
 
         self.chemberta_encoder = ChemBERTaEncoder(chemberta_model_path, device, use_cache=use_cache)

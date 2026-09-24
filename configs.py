@@ -18,6 +18,11 @@ _C.PROTEIN.KERNEL_SIZE = [3, 6, 9]
 _C.PROTEIN.EMBEDDING_DIM = 128
 _C.PROTEIN.PADDING = True
 _C.PROTEIN.ESM_FEATURE_DIM = 1280
+# iter4 - 3D-04: swap the protein encoder for the cache-backed Protein3DEncoder
+# (ESM-IF1 structure embeddings, with an ESM-2 fallback for proteins that have no
+# usable AlphaFold model). False keeps the ESM-2 baseline path unchanged. Both
+# encoders emit ESM_FEATURE_DIM (1280), so nothing downstream resizes.
+_C.PROTEIN.USE_3D = False
 
 _C.BCN = CN()
 _C.BCN.HEADS = 8
