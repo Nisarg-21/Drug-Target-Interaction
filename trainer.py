@@ -238,7 +238,11 @@ class Trainer(object):
 
 
             for i, (v_d, smiles_sequences, v_p_strings, labels) in enumerate(data_loader):
-                v_d = v_d.to(self.device)
+                # iter5 - 3D-D03: on the DRUG.USE_3D path this is a list of SMILES strings,
+                # which has no .to(). DGL graphs and tensors still take the same branch, so
+                # the baseline path is unchanged.
+                if hasattr(v_d, "to"):
+                    v_d = v_d.to(self.device)
                 labels = labels.float().to(self.device)
 
                 score, attention_weights = model_to_eval(v_d, smiles_sequences, v_p_strings, mode="eval")
@@ -393,7 +397,11 @@ class Trainer(object):
         num_batches = len(self.train_dataloader)
         for i, (v_d, smiles_sequences, v_p, labels) in enumerate(tqdm(self.train_dataloader, desc=f"Epoch {self.current_epoch} Training")):
             self.step += 1
-            v_d = v_d.to(self.device)
+            # iter5 - 3D-D03: on the DRUG.USE_3D path this is a list of SMILES strings,
+            # which has no .to(). DGL graphs and tensors still take the same branch, so
+            # the baseline path is unchanged.
+            if hasattr(v_d, "to"):
+                v_d = v_d.to(self.device)
             labels = labels.float().to(self.device)
 
             self.optim.zero_grad()
@@ -439,14 +447,22 @@ class Trainer(object):
             # batch_s[0] indexing tried to unpack a single DGLGraph into four names.
             v_d_s, smiles_sequences_s, v_p_s_strings, labels_s = batch_s
 
-            v_d_s = v_d_s.to(self.device)
+            # iter5 - 3D-D03: on the DRUG.USE_3D path this is a list of SMILES strings,
+            # which has no .to(). DGL graphs and tensors still take the same branch, so
+            # the baseline path is unchanged.
+            if hasattr(v_d_s, "to"):
+                v_d_s = v_d_s.to(self.device)
             labels_s = labels_s.float().to(self.device)
 
 
             v_d_t, smiles_sequences_t, v_p_t_strings, _ = batch_t
 
 
-            v_d_t = v_d_t.to(self.device)
+            # iter5 - 3D-D03: on the DRUG.USE_3D path this is a list of SMILES strings,
+            # which has no .to(). DGL graphs and tensors still take the same branch, so
+            # the baseline path is unchanged.
+            if hasattr(v_d_t, "to"):
+                v_d_t = v_d_t.to(self.device)
 
 
             if self.current_epoch >= self.da_init_epoch:

@@ -6,7 +6,7 @@ except ImportError as e:
 
 from trainer import Trainer
 from models import CMA
-from utils import set_seed, graph_collate_func, mkdir
+from utils import set_seed, graph_collate_func, smiles_collate_func, mkdir
 from configs import get_cfg_defaults
 from dataloader import DTIDataset, MultiDataLoader
 from domain_adaptator import Discriminator
@@ -117,9 +117,9 @@ def run_single_experiment(cfg, args, device, seed, esm_model_path, chemberta_mod
         df_val = pd.read_csv(val_path)
         df_test = pd.read_csv(test_path)
 
-        train_dataset = DTIDataset(df_train.index.values, df_train)
-        val_dataset = DTIDataset(df_val.index.values, df_val)
-        test_dataset = DTIDataset(df_test.index.values, df_test)
+        train_dataset = DTIDataset(df_train.index.values, df_train, use_3d=cfg.DRUG.USE_3D)
+        val_dataset = DTIDataset(df_val.index.values, df_val, use_3d=cfg.DRUG.USE_3D)
+        test_dataset = DTIDataset(df_test.index.values, df_test, use_3d=cfg.DRUG.USE_3D)
     else:
         train_source_path = os.path.join(dataFolder, 'source_train.csv')
         train_target_path = os.path.join(dataFolder, 'target_train.csv')
@@ -128,9 +128,9 @@ def run_single_experiment(cfg, args, device, seed, esm_model_path, chemberta_mod
         df_train_target = pd.read_csv(train_target_path)
         df_test_target = pd.read_csv(test_target_path)
 
-        train_dataset = DTIDataset(df_train_source.index.values, df_train_source)
-        train_target_dataset = DTIDataset(df_train_target.index.values, df_train_target)
-        test_target_dataset = DTIDataset(df_test_target.index.values, df_test_target)
+        train_dataset = DTIDataset(df_train_source.index.values, df_train_source, use_3d=cfg.DRUG.USE_3D)
+        train_target_dataset = DTIDataset(df_train_target.index.values, df_train_target, use_3d=cfg.DRUG.USE_3D)
+        test_target_dataset = DTIDataset(df_test_target.index.values, df_test_target, use_3d=cfg.DRUG.USE_3D)
 
     if cfg.COMET.USE and comet_support:
         experiment = Experiment(
@@ -168,8 +168,12 @@ def run_single_experiment(cfg, args, device, seed, esm_model_path, chemberta_mod
             experiment.add_tag(cfg.COMET.TAG)
         experiment.set_name(f"{args.data}_{args.split}_{suffix}_seed{seed}")
 
+    # iter5 - 3D-D03: DRUG.USE_3D collates a list of SMILES instead of dgl.batch-ing
+    # graphs. Selecting the function here keeps the baseline collate untouched.
+    drug_collate_fn = smiles_collate_func if cfg.DRUG.USE_3D else graph_collate_func
+
     params = {'batch_size': cfg.SOLVER.BATCH_SIZE, 'shuffle': True, 'num_workers': cfg.SOLVER.NUM_WORKERS,
-              'drop_last': True, 'collate_fn': graph_collate_func}
+              'drop_last': True, 'collate_fn': drug_collate_fn}
 
     if not cfg.DA.USE:
         training_generator = DataLoader(train_dataset, **params)

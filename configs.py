@@ -10,6 +10,12 @@ _C.DRUG.PADDING = True
 _C.DRUG.HIDDEN_LAYERS = [128, 128, 1280]
 _C.DRUG.NODE_IN_EMBEDDING = 128
 _C.DRUG.MAX_NODES = 290
+# iter5 - 3D-D03: replace the DGL/GCN drug path with the cache-backed
+# Drug3DEncoder (precomputed Uni-Mol per-atom embeddings, native 512). False
+# keeps the GCN baseline path unchanged, including its DGL graph construction,
+# collate and node mask. The width difference is absorbed by
+# gcn_proj_for_cross_attn, which already adapted the GCN's output.
+_C.DRUG.USE_3D = False
 
 _C.PROTEIN = CN()
 # iter1 - DEAD CODE (CO-07): NUM_FILTERS/KERNEL_SIZE/EMBEDDING_DIM/PADDING are CNN-era, unused, kept intentionally

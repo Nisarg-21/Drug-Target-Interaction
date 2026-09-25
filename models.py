@@ -10,6 +10,7 @@ from dgllife.model.gnn import GCN
 from attention import MultiHeadAttentionLayer
 from torch.nn.utils.weight_norm import weight_norm
 from transformers import AutoTokenizer, AutoModelForMaskedLM, AutoModel
+from drug_3d import Drug3DEncoder
 
 def masked_mean_pooling(x, mask):
     """Applies mask and then computes mean."""
@@ -238,11 +239,30 @@ class CMA(nn.Module):
         drug_embedding = config["DRUG"]["NODE_IN_EMBEDDING"]
         drug_hidden_feats = config["DRUG"]["HIDDEN_LAYERS"]
         max_drug_nodes = config["DRUG"]["MAX_NODES"]
-        self.drug_extractor = MolecularGCN(in_feats=drug_in_feats, dim_embedding=drug_embedding,
-                                           padding=config["DRUG"]["PADDING"],
-                                           hidden_feats=drug_hidden_feats,
-                                           max_nodes=max_drug_nodes)
-        self.gcn_feature_dim = drug_hidden_feats[-1]
+        # iter5 - 3D-D03: DRUG.USE_3D swaps the DGL/GCN drug path for the
+        # cache-backed Drug3DEncoder, which serves precomputed Uni-Mol per-atom
+        # embeddings at their native 512. Read defensively, like USE_CACHE below,
+        # so a config saved before this flag existed still constructs.
+        #
+        # Unlike the GCN this encoder also returns the per-atom mask, which on the
+        # baseline path comes off the DGL graph in forward(). See the branch there.
+        self.use_3d_drug = bool(config.get("DRUG", {}).get("USE_3D", False))
+        if self.use_3d_drug:
+            unimol_cache_dir = os.path.join(
+                os.path.dirname(os.path.abspath(__file__)), "cache", "unimol"
+            )
+            self.drug_extractor = Drug3DEncoder(cache_dir=unimol_cache_dir, device=device,
+                                                max_nodes=max_drug_nodes)
+            # Take the width from the encoder, the way the protein side already
+            # does below, so Uni-Mol's 512 propagates into gcn_proj_for_cross_attn
+            # instead of the config's GCN-era 1280.
+            self.gcn_feature_dim = self.drug_extractor.output_dim
+        else:
+            self.drug_extractor = MolecularGCN(in_feats=drug_in_feats, dim_embedding=drug_embedding,
+                                               padding=config["DRUG"]["PADDING"],
+                                               hidden_feats=drug_hidden_feats,
+                                               max_nodes=max_drug_nodes)
+            self.gcn_feature_dim = drug_hidden_feats[-1]
 
         # feature-cache: SOLVER.USE_CACHE (default False) turns on the on-disk embedding cache
         # for both frozen encoders. Read defensively so a partial config still constructs.
@@ -278,19 +298,20 @@ class CMA(nn.Module):
         self.random_layer = None
 
     def forward(self, bg_d, smiles_sequences, protein_sequences, mode="train"):
-        v_d_graph_nodes = self.drug_extractor(bg_d)
-        # mask-fix: this used to be (arange(max_nodes) < bg_d.batch_num_nodes()). The dataloader
-        # pads every molecule to DRUG.MAX_NODES *before* batching, so batch_num_nodes() returns
-        # max_nodes for every graph and that comparison was unconditionally true: the mask was
-        # all-ones, masked_mean_pooling averaged ~275 padding rows alongside the real atoms, and
-        # the query axis of both attention layers ran from virtual nodes as well as real ones.
-        # The real per-molecule count is only known at graph construction, so the dataloader now
-        # records it per node as ndata['node_mask'] (bool, True for a real atom); it survives
-        # MolecularGCN's ndata.pop('h'). Same [B, N, 1] shape and float/bool pair as before, so
-        # every downstream consumer is unchanged.
-        batch_size, max_gcn_nodes = v_d_graph_nodes.shape[0], v_d_graph_nodes.shape[1]
-        gcn_node_mask_bool = bg_d.ndata['node_mask'].view(batch_size, max_gcn_nodes, 1).to(self.device)
-        gcn_node_mask = gcn_node_mask_bool.to(v_d_graph_nodes.dtype)
+        # iter5 - 3D-D03: on the USE_3D path bg_d is a list of SMILES strings, not a
+        # DGL graph, and Drug3DEncoder returns (features [B, N, 512], mask [B, N]).
+        # Both the node features AND the mask come from that return - there is no
+        # graph to read ndata['node_mask'] off. The mask is unsqueezed to [B, N, 1]
+        # so it has the exact shape and bool/float pairing the baseline produces,
+        # leaving every downstream consumer (the two attention masks and the final
+        # pooling) untouched.
+        if self.use_3d_drug:
+            v_d_graph_nodes, drug_atom_mask = self.drug_extractor(bg_d)
+            gcn_node_mask_bool = drug_atom_mask.unsqueeze(-1).bool().to(self.device)
+            gcn_node_mask = gcn_node_mask_bool.to(v_d_graph_nodes.dtype)
+        else:
+            v_d_graph_nodes = self.drug_extractor(bg_d)
+            gcn_node_mask_bool, gcn_node_mask = self._gcn_node_mask_from_graph(bg_d, v_d_graph_nodes)
 
         v_d_chembl_tokens, chemberta_mask = self.chemberta_encoder(smiles_sequences)
         max_seq_len_c = v_d_chembl_tokens.shape[1]
@@ -328,6 +349,27 @@ class CMA(nn.Module):
              return v_d_nodes_proj, v_p, f_pooled, score
         elif mode == "eval":
             return score, ban_attention_weights
+
+    def _gcn_node_mask_from_graph(self, bg_d, v_d_graph_nodes):
+        """Baseline drug node mask, lifted verbatim out of forward().
+
+        Unchanged behaviour - it is a method only so the USE_3D branch above can
+        pick one source or the other without duplicating the fusion code below.
+        """
+        # mask-fix: this used to be (arange(max_nodes) < bg_d.batch_num_nodes()). The dataloader
+        # pads every molecule to DRUG.MAX_NODES *before* batching, so batch_num_nodes() returns
+        # max_nodes for every graph and that comparison was unconditionally true: the mask was
+        # all-ones, masked_mean_pooling averaged ~275 padding rows alongside the real atoms, and
+        # the query axis of both attention layers ran from virtual nodes as well as real ones.
+        # The real per-molecule count is only known at graph construction, so the dataloader now
+        # records it per node as ndata['node_mask'] (bool, True for a real atom); it survives
+        # MolecularGCN's ndata.pop('h'). Same [B, N, 1] shape and float/bool pair as before, so
+        # every downstream consumer is unchanged.
+        batch_size, max_gcn_nodes = v_d_graph_nodes.shape[0], v_d_graph_nodes.shape[1]
+        gcn_node_mask_bool = bg_d.ndata['node_mask'].view(batch_size, max_gcn_nodes, 1).to(self.device)
+        gcn_node_mask = gcn_node_mask_bool.to(v_d_graph_nodes.dtype)
+
+        return gcn_node_mask_bool, gcn_node_mask
 
 
 class MolecularGCN(nn.Module):

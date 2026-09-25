@@ -8,10 +8,15 @@ from utils import integer_label_protein  # iter1 - DEAD CODE (CO-06): unused, ke
 
 
 class DTIDataset(data.Dataset):         #sets up fuunction for calucalting features and edges
-    def __init__(self, list_IDs, df, max_drug_nodes=290):
+    def __init__(self, list_IDs, df, max_drug_nodes=290, use_3d=False):
         self.list_IDs = list_IDs
         self.df = df
         self.max_drug_nodes = max_drug_nodes
+        # iter5 - 3D-D03: DRUG.USE_3D returns the raw SMILES instead of building a
+        # DGL graph. Drug3DEncoder keys its cache on md5(smiles) and does its own
+        # padding to max_drug_nodes, so the graph, its virtual nodes and its
+        # node_mask are all dead weight on that path.
+        self.use_3d = use_3d
 
         self.atom_featurizer = CanonicalAtomFeaturizer()
         self.bond_featurizer = CanonicalBondFeaturizer(self_loop=True)
@@ -23,6 +28,13 @@ class DTIDataset(data.Dataset):         #sets up fuunction for calucalting featu
     def __getitem__(self, index):
         index = self.list_IDs[index]
         smiles = self.df.iloc[index]['SMILES']
+
+        # iter5 - 3D-D03: on the USE_3D path the drug side is a cache lookup keyed
+        # by the SMILES string, so nothing below this point is needed. Returning
+        # the string in the graph's slot keeps the 4-tuple shape every consumer
+        # already unpacks (trainer.py:396, :442, :449).
+        if self.use_3d:
+            return smiles, smiles, self.df.iloc[index]['Protein'], self.df.iloc[index]["Y"]
 
         v_d = self.fc(smiles=smiles, node_featurizer=self.atom_featurizer, edge_featurizer=self.bond_featurizer)
         actual_node_feats = v_d.ndata.pop('h')

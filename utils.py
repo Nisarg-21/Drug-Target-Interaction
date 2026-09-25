@@ -56,6 +56,21 @@ def graph_collate_func(list_of_tuples):  # makes batches of 64
     return batch_graph, list_smiles, list_protein, list_labels
 
 
+# iter5 - 3D-D03: the DRUG.USE_3D collate. A separate function rather than a
+# branch inside graph_collate_func, so the baseline path above stays literally
+# the same code it was - no new conditional runs on it.
+#
+# The drug slot is a plain list of SMILES strings: Drug3DEncoder looks each one
+# up by md5 and pads to DRUG.MAX_NODES itself, so there is no graph to dgl.batch.
+def smiles_collate_func(list_of_tuples):
+    list_drug_smiles = [t[0] for t in list_of_tuples]
+    list_smiles = [t[1] for t in list_of_tuples]
+    list_protein = [t[2] for t in list_of_tuples]
+    list_labels = torch.stack([torch.tensor(t[3], dtype=torch.float32) for t in list_of_tuples])
+
+    return list_drug_smiles, list_smiles, list_protein, list_labels
+
+
 def mkdir(path):    #just correct path removes whitespace and /
     path = path.strip()
     path = path.rstrip("\\")
