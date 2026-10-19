@@ -1,0 +1,40 @@
+# SaProt protein encoder branch (3d-saprot) - extra requirements.
+#
+# The SaProt path adds no new Python dependency beyond what the training env
+# already has: SaProt is an ESM-architecture masked LM, so it loads through the
+# same transformers AutoModelForMaskedLM call the ESM-2 baseline uses. The one
+# genuinely new requirement is the Foldseek BINARY, which is not a pip package.
+
+# --- Python (already present in the training env; listed for completeness) ---
+transformers>=4.30
+torch
+numpy
+pandas
+
+# --- Foldseek binary (NOT pip-installable) ----------------------------------
+# scripts/run_foldseek.py shells out to `foldseek structureto3didescriptor` and
+# takes the binary path as --foldseek, so it does not need to be on PATH.
+#
+#   conda install -c conda-forge -c bioconda foldseek
+# or a static build:
+#   wget https://mmseqs.com/foldseek/foldseek-linux-avx2.tar.gz
+#   tar xvzf foldseek-linux-avx2.tar.gz          # -> foldseek/bin/foldseek
+#
+# Then:
+#   python scripts/run_foldseek.py --foldseek /path/to/foldseek/bin/foldseek
+
+# --- SaProt checkpoint ------------------------------------------------------
+# westlake-repl/SaProt_650M_AF2   ~2.6 GB, downloaded from HuggingFace on first
+# use. config.json reports hidden_size 1280 - the same width as ESM-2 650M - so
+# the fusion stack needs no resizing.
+#
+# The checkpoint is NOT vendored in this repo and is NOT kept on the laptop. The
+# model id/path is a CLI argument so each machine fetches or points at its own:
+#   python scripts/precompute_saprot.py --model-path westlake-repl/SaProt_650M_AF2
+#   python scripts/precompute_saprot.py --model-path /local/path/to/SaProt_650M_AF2
+
+# --- Pipeline order ---------------------------------------------------------
+#   1. scripts/fetch_alphafold.py      (already run) -> alphafold_data/
+#   2. scripts/run_foldseek.py         -> alphafold_data/saprot_sequences.json
+#   3. scripts/precompute_saprot.py    -> cache/saprot/{md5}.pt
+#   4. train with PROTEIN.ENCODER saprot

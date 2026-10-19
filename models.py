@@ -260,14 +260,33 @@ class CMA(nn.Module):
         # and both expose .output_dim, so protein_feature_dim below and every
         # downstream consumer in forward() are untouched. USE_3D False leaves the
         # ESM-2 baseline path exactly as it was.
+        #
+        # iter4 - 3D-05: PROTEIN.ENCODER names the encoder directly - "esm2" (the
+        # baseline), "esmif1" (the USE_3D path above) or "saprot" (structure-aware
+        # SaProt over Foldseek 3Di tokens). It defaults to "esm2", so an existing
+        # config that never sets it, with or without USE_3D, behaves exactly as
+        # before: USE_3D is still honoured and still selects ESM-IF1.
         use_3d = bool(config.get("PROTEIN", {}).get("USE_3D", False))
-        if use_3d:
-            esmif1_cache_dir = os.path.join(
-                os.path.dirname(os.path.abspath(__file__)), "cache", "esmif1"
-            )
+        protein_encoder = str(config.get("PROTEIN", {}).get("ENCODER", "esm2")).lower()
+        if protein_encoder == "esm2" and use_3d:
+            protein_encoder = "esmif1"          # backwards compatibility
+
+        repo_root = os.path.dirname(os.path.abspath(__file__))
+        if protein_encoder == "esmif1":
+            esmif1_cache_dir = os.path.join(repo_root, "cache", "esmif1")
             self.protein_extractor = Protein3DEncoder(cache_dir=esmif1_cache_dir, device=device)
-        else:
+        elif protein_encoder == "saprot":
+            # All SaProt logic lives in encoders/saprot.py; this is only the switch.
+            from encoders.saprot import SaProtProteinEncoder
+            self.protein_extractor = SaProtProteinEncoder(
+                cache_dir=os.path.join(repo_root, "cache", "saprot"), device=device)
+        elif protein_encoder == "esm2":
             self.protein_extractor = ProtBertProteinEncoder(protbert_model_path, device, use_cache=use_cache)
+        else:
+            raise ValueError(
+                f"PROTEIN.ENCODER must be one of esm2 / esmif1 / saprot, got "
+                f"{protein_encoder!r}"
+            )
         self.protein_feature_dim = self.protein_extractor.output_dim
 
         self.chemberta_encoder = ChemBERTaEncoder(chemberta_model_path, device, use_cache=use_cache)

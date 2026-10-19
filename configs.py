@@ -23,6 +23,14 @@ _C.PROTEIN.ESM_FEATURE_DIM = 1280
 # usable AlphaFold model). False keeps the ESM-2 baseline path unchanged. Both
 # encoders emit ESM_FEATURE_DIM (1280), so nothing downstream resizes.
 _C.PROTEIN.USE_3D = False
+# iter4 - 3D-05: which protein encoder to build.
+#   esm2    ESM-2 650M per-residue embeddings (the baseline)
+#   esmif1  cache-backed Protein3DEncoder (ESM-IF1 structures + ESM-2 fallback)
+#   saprot  cache-backed SaProt over Foldseek 3Di tokens (encoders/saprot.py)
+# Defaults to esm2 so existing runs are unchanged. USE_3D above is still honoured
+# when ENCODER is left at its default, so configs written before this flag
+# existed keep selecting esmif1.
+_C.PROTEIN.ENCODER = "esm2"
 
 _C.BCN = CN()
 _C.BCN.HEADS = 8
