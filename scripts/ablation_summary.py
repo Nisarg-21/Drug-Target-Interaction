@@ -6,6 +6,9 @@
     python scripts/ablation_summary.py append ... --status crashed      # no metrics read
     python scripts/ablation_summary.py report                           # print table + flags
 
+Rows with status "superseded" (old results kept for reference only) are never
+compared or flagged.
+
 Every append re-derives the flags for all rows, because a later arm can turn an
 earlier run into an outlier:
     best_epoch<10                 best validation epoch below 10
@@ -63,7 +66,7 @@ def append(args):
            "best_epoch": "", "auroc": "", "auprc": "", "f1": "",
            "runtime_h": "" if args.runtime_s is None else f"{args.runtime_s / 3600:.2f}",
            "status": args.status, "flags": "", "note": args.note or ""}
-    if args.status == "ok":
+    if args.status in ("ok", "superseded"):
         metrics = torch.load(os.path.join(args.run_dir, "result_metrics.pt"),
                              map_location="cpu", weights_only=False)
         test = metrics["test_metrics"]
@@ -105,7 +108,7 @@ def main():
     add.add_argument("--arm", required=True)
     add.add_argument("--seed", required=True)
     add.add_argument("--runtime-s", type=float, default=None)
-    add.add_argument("--status", default="ok", choices=["ok", "crashed", "skipped_exists"])
+    add.add_argument("--status", default="ok", choices=["ok", "crashed", "skipped_exists", "superseded"])
     add.add_argument("--note", default=None)
     sub.add_parser("report")
     args = parser.parse_args()
