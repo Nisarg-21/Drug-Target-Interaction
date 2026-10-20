@@ -279,7 +279,9 @@ class CMA(nn.Module):
             # All SaProt logic lives in encoders/saprot.py; this is only the switch.
             from encoders.saprot import SaProtProteinEncoder
             self.protein_extractor = SaProtProteinEncoder(
-                cache_dir=os.path.join(repo_root, "cache", "saprot"), device=device)
+                cache_dir=os.path.join(repo_root, config.get("PROTEIN", {}).get(
+                    "SAPROT_CACHE_DIR", os.path.join("cache", "saprot"))),
+                device=device)
         elif protein_encoder == "esm2":
             self.protein_extractor = ProtBertProteinEncoder(protbert_model_path, device, use_cache=use_cache)
         else:

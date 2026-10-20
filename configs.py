@@ -31,6 +31,9 @@ _C.PROTEIN.USE_3D = False
 # when ENCODER is left at its default, so configs written before this flag
 # existed keep selecting esmif1.
 _C.PROTEIN.ENCODER = "esm2"
+# SaProt cache directory, repo-relative unless absolute. cache/saprot is the full-3Di
+# arm; cache/saprot_masked (precompute_saprot.py --mask-all) is the sequence-only arm.
+_C.PROTEIN.SAPROT_CACHE_DIR = "cache/saprot"
 
 _C.BCN = CN()
 _C.BCN.HEADS = 8
