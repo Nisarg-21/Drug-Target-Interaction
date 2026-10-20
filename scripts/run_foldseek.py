@@ -17,6 +17,11 @@ Inputs come from scripts/fetch_alphafold.py's outputs on the server:
     alphafold_data/structures/{ACC}.cif     the AlphaFold model
     alphafold_data/plddt/{ACC}.npy          per-residue pLDDT
 
+Optionally also scripts/recover_alphafold.py's outputs (--recovered-root, default
+alphafold_recovered/): usable_structures_recovered.json adds exact-match models for
+proteins in fallback_list.json and replaces first-pass models whose residues differ
+from our sequence. Its paths are repo-relative.
+
 Every protein in BOTH lists gets an output record: the ones with a clean
 structure get real 3Di, the ones without get a fully masked 3Di string so SaProt
 still runs on them from sequence alone. That keeps the SaProt cache covering the
@@ -95,6 +100,30 @@ def load_sequences_by_md5(datasets_root, dataset_names):
 def load_selection(path):
     with open(path, "r", encoding="utf-8") as handle:
         return json.load(handle)["records"]
+
+
+def merge_recovered(usable, fallback, recovered_path, repo_root=_REPO_ROOT):
+    """Fold recover_alphafold.py's exact matches into the usable list.
+
+    Recovered paths are repo-relative, so they are made absolute here;
+    os.path.join(alphafold_root, absolute) then leaves them untouched. A recovered
+    protein leaves the fallback list, and a recovered entry replaces a first-pass
+    one for the same md5 (that first-pass model did not match our residues).
+    """
+    if not recovered_path or not os.path.exists(recovered_path):
+        return 0
+    recovered = load_selection(recovered_path)
+    for key, entry in recovered.items():
+        usable[key] = {
+            "accession": entry.get("accession"),
+            "structure_file": os.path.join(repo_root, entry["structure_path"]),
+            "plddt_file": os.path.join(repo_root, entry["plddt_path"]),
+            "sequence_length": entry.get("sequence_length"),
+            "source": "recovered",
+            "match_type": entry.get("match_type"),
+        }
+        fallback.pop(key, None)
+    return len(recovered)
 
 
 # --- foldseek --------------------------------------------------------------
@@ -255,7 +284,7 @@ def process_all(sequences, usable, fallback, foldseek_binary, alphafold_root,
             if entry is not None:
                 try:
                     structure_path = os.path.join(alphafold_root, entry["structure_file"])
-                    _aa, three_di = run_foldseek(structure_path, foldseek_binary, workdir)
+                    structure_aa, three_di = run_foldseek(structure_path, foldseek_binary, workdir)
 
                     # The structure must cover exactly our sequence. Anything else
                     # means the 3Di would be pasted onto the wrong residues, which
@@ -264,6 +293,14 @@ def process_all(sequences, usable, fallback, foldseek_binary, alphafold_root,
                         raise ValueError(
                             f"structure has {len(three_di)} residues, sequence has "
                             f"{len(sequence)}"
+                        )
+                    # Same length is not enough: an older UniProt sequence version
+                    # can keep the length and change residues. Exact match only.
+                    if structure_aa != sequence:
+                        differing = sum(a != b for a, b in zip(structure_aa, sequence))
+                        raise ValueError(
+                            f"structure residues differ from sequence at {differing} "
+                            f"of {len(sequence)} positions"
                         )
 
                     if threshold is not None:
@@ -275,6 +312,7 @@ def process_all(sequences, usable, fallback, foldseek_binary, alphafold_root,
                         "has_structure": 1,
                         "sequence_length": len(sequence),
                         "accession": entry.get("accession"),
+                        "structure_source": entry.get("source", "alphafold_data"),
                         "masked_residues": three_di.count(MASK_3DI),
                     }
                 except Exception as exc:                   # noqa: BLE001
@@ -320,6 +358,18 @@ def write_report(report_path, records, demoted, threshold):
     lines.append(f"  proteins total            : {len(records)}")
     lines.append(f"  with real 3Di             : {with_structure}")
     lines.append(f"  sequence-only (all '#')   : {without}")
+    lines.append("")
+    reasons = {}
+    for _key, reason in demoted:
+        if "residues, sequence has" in reason:
+            kind = "length mismatch"
+        elif "residues differ from sequence" in reason:
+            kind = "residue mismatch"
+        else:
+            kind = "foldseek / other failure"
+        reasons[kind] = reasons.get(kind, 0) + 1
+    for kind in sorted(reasons):
+        lines.append(f"  demoted - {kind:<24}: {reasons[kind]}")
     lines.append("")
     lines.append(f"DEMOTED TO SEQUENCE-ONLY THIS RUN ({len(demoted)})")
     lines.append("-" * 72)
@@ -450,10 +500,12 @@ def main():
                         help="path to the foldseek binary (required for a real run)")
     parser.add_argument("--alphafold-root", default="alphafold_data",
                         help="server directory with structures/, plddt/ and the lists")
+    parser.add_argument("--recovered-root", default="alphafold_recovered",
+                        help="recover_alphafold.py output; skipped if it does not exist")
     parser.add_argument("--datasets-root", default="datasets")
     parser.add_argument("--datasets", nargs="+", default=["biosnap", "bindingdb"])
     parser.add_argument("--output", default=None,
-                        help="default: <alphafold-root>/saprot_sequences.json")
+                        help="default: cache/saprot_sequences.json (never inside alphafold_data/)")
     parser.add_argument("--plddt_mask_threshold", type=float, default=None,
                         help="OFF by default; below this pLDDT the 3Di token becomes '#'")
     parser.add_argument("--limit", type=int, default=None)
@@ -464,13 +516,18 @@ def main():
     if not args.foldseek:
         parser.error("--foldseek is required for a real run (or use --self-test)")
 
-    output_path = args.output or os.path.join(args.alphafold_root, "saprot_sequences.json")
+    output_path = args.output or os.path.join(_REPO_ROOT, "cache", "saprot_sequences.json")
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
     report_path = os.path.join(os.path.dirname(output_path) or ".", "saprot_sequences_report.txt")
 
     usable = load_selection(os.path.join(args.alphafold_root, "usable_structures.json"))
     fallback = load_selection(os.path.join(args.alphafold_root, "fallback_list.json"))
+    recovered = merge_recovered(
+        usable, fallback,
+        os.path.join(args.recovered_root, "usable_structures_recovered.json"))
     sequences = load_sequences_by_md5(args.datasets_root, args.datasets)
-    print(f"sequences: {len(sequences)}  usable: {len(usable)}  fallback: {len(fallback)}")
+    print(f"sequences: {len(sequences)}  usable: {len(usable)} (recovered {recovered})  "
+          f"fallback: {len(fallback)}")
     print(f"pLDDT masking: "
           f"{'off (raw 3Di)' if args.plddt_mask_threshold is None else args.plddt_mask_threshold}")
 

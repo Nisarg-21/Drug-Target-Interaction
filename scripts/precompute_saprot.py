@@ -266,7 +266,7 @@ def main():
     parser.add_argument("--self-test", action="store_true",
                         help="stubbed check; no gpu, weights or data")
     parser.add_argument("--saprot-sequences", default=None,
-                        help="default: <alphafold-root>/saprot_sequences.json")
+                        help="default: cache/saprot_sequences.json")
     parser.add_argument("--alphafold-root", default="alphafold_data")
     parser.add_argument("--cache-dir", default=None, help="default: <repo>/cache/saprot")
     parser.add_argument("--model-path", default=SAPROT_MODEL_ID,
@@ -276,18 +276,31 @@ def main():
     parser.add_argument("--max-length", type=int, default=SAPROT_MAX_LENGTH,
                         help="token budget; 512 matches the ESM-2 baseline")
     parser.add_argument("--limit", type=int, default=None)
+    parser.add_argument("--mask-all", action="store_true",
+                        help="sequence-only ablation: replace every 3Di slot with '#' "
+                             "(use with a separate --cache-dir)")
     args = parser.parse_args()
 
     if args.self_test:
         return self_test()
 
     cache_dir = args.cache_dir or os.path.join(_REPO_ROOT, "cache", "saprot")
-    report_path = os.path.join(os.path.dirname(cache_dir), "saprot_report.txt")
+    report_path = os.path.join(os.path.dirname(cache_dir),
+                               f"{os.path.basename(os.path.normpath(cache_dir))}_report.txt")
     os.makedirs(cache_dir, exist_ok=True)
 
     sequences_path = args.saprot_sequences or os.path.join(
-        args.alphafold_root, "saprot_sequences.json")
+        _REPO_ROOT, "cache", "saprot_sequences.json")
     records = load_saprot_sequences(sequences_path)
+    if args.mask_all:
+        # Even positions are the amino acids, odd positions the 3Di slots.
+        records = {
+            key: dict(record,
+                      saprot_sequence="".join(aa + "#" for aa in record["saprot_sequence"][::2]),
+                      has_structure=0)
+            for key, record in records.items()
+        }
+        print("mask-all: every 3Di slot replaced with '#'")
     with_structure = sum(1 for r in records.values() if r.get("has_structure"))
     print(f"proteins: {len(records)}  with 3Di: {with_structure}  "
           f"sequence-only: {len(records) - with_structure}")
