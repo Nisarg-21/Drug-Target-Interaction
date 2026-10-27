@@ -10,6 +10,19 @@ _C.DRUG.PADDING = True
 _C.DRUG.HIDDEN_LAYERS = [128, 128, 1280]
 _C.DRUG.NODE_IN_EMBEDDING = 128
 _C.DRUG.MAX_NODES = 290
+# iter6 - what the GCN atoms are fused with before the protein cross-attention.
+#   chemberta     baseline: cross-attention with ChemBERTa SMILES tokens (unchanged)
+#   gcn_only      no ChemBERTa, D = LN(GCN)
+#   unimol_gated  no ChemBERTa, D = z*LN(GCN) + (1-z)*U, scalar gate z per atom,
+#                 U = frozen Uni-Mol per-atom features through a trainable adapter
+# Defaults to chemberta so existing configs and runs are unchanged.
+_C.DRUG.FUSION = "chemberta"
+# Heavy-atom Uni-Mol cache written by scripts/precompute_unimol_heavy.py
+# (relative paths are taken from the repo root).
+_C.DRUG.UNIMOL_CACHE_DIR = "cache/unimol_heavy"
+# A SMILES with no Uni-Mol record: "error" stops the run, "zeros" gives it an
+# all-zero Uni-Mol view (the gate can still use its GCN view).
+_C.DRUG.UNIMOL_MISSING = "error"
 
 _C.PROTEIN = CN()
 # iter1 - DEAD CODE (CO-07): NUM_FILTERS/KERNEL_SIZE/EMBEDDING_DIM/PADDING are CNN-era, unused, kept intentionally

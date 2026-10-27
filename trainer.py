@@ -1,6 +1,8 @@
 import torch
 import torch.nn as nn
 import copy
+import csv
+import json
 import os
 import numpy as np
 from sklearn.metrics import roc_auc_score, average_precision_score, roc_curve, confusion_matrix, precision_recall_curve, precision_score, accuracy_score, recall_score, f1_score
@@ -237,11 +239,24 @@ class Trainer(object):
                       return 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
 
 
+            # iter6 - DRUG.FUSION=unimol_gated: collect the per-atom gate (GCN share) of every
+            # test drug. The gate depends on the drug alone, so one entry per unique SMILES.
+            collect_gates = dataloader == "test" and hasattr(model_to_eval, "last_drug_gate")
+            test_drug_gates = {}
+
             for i, (v_d, smiles_sequences, v_p_strings, labels) in enumerate(data_loader):
                 v_d = v_d.to(self.device)
                 labels = labels.float().to(self.device)
 
+                if collect_gates:
+                    model_to_eval.last_drug_gate = None
                 score, attention_weights = model_to_eval(v_d, smiles_sequences, v_p_strings, mode="eval")
+                if collect_gates and model_to_eval.last_drug_gate is not None:
+                    gate, gate_mask = model_to_eval.last_drug_gate
+                    gate, gate_mask = gate.cpu(), gate_mask.cpu()
+                    for row, smiles in enumerate(smiles_sequences):
+                        if smiles not in test_drug_gates:
+                            test_drug_gates[smiles] = gate[row][gate_mask[row]].tolist()
 
                 if self.n_class == 1:
                     n, loss = binary_cross_entropy(score, labels)
@@ -254,6 +269,8 @@ class Trainer(object):
 
         # iter1 - FIXED (CO-02): restore the live (current-epoch) weights after a test pass
         self._restore_live_weights(live_state)
+        if dataloader == "test" and test_drug_gates:
+            self.test_drug_gates = test_drug_gates
 
         eval_loss = test_loss / num_batches
         if len(y_label) == 0:
@@ -373,6 +390,20 @@ class Trainer(object):
             fp.write(self.test_table.get_string())
         with open(train_prettytable_file, "w") as fp:
             fp.write(self.train_table.get_string())
+
+        # iter6 - per-atom gate values of the test drugs (DRUG.FUSION=unimol_gated only).
+        # gate = share of the GCN view, 1 - gate = share of Uni-Mol; atoms in dgllife order.
+        test_drug_gates = getattr(self, "test_drug_gates", None)
+        if test_drug_gates:
+            with open(os.path.join(self.output_dir, "test_atom_gates.json"), "w") as fp:
+                json.dump(test_drug_gates, fp)
+            with open(os.path.join(self.output_dir, "test_drug_gates.csv"), "w", newline="") as fp:
+                writer = csv.writer(fp)
+                writer.writerow(["SMILES", "n_atoms", "mean_gate", "min_gate", "max_gate"])
+                for smiles, values in test_drug_gates.items():
+                    if values:
+                        writer.writerow([smiles, len(values), f"{np.mean(values):.6f}",
+                                         f"{np.min(values):.6f}", f"{np.max(values):.6f}"])
 
     # iter1 - FIXED (SW-06): ReverseLayerF was applied twice (once with self.alpha, once with the
     # decayed lambda). Each application negates the gradient, so the two cancelled and no

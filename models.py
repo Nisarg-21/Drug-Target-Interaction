@@ -291,17 +291,54 @@ class CMA(nn.Module):
             )
         self.protein_feature_dim = self.protein_extractor.output_dim
 
-        self.chemberta_encoder = ChemBERTaEncoder(chemberta_model_path, device, use_cache=use_cache)
-        self.chemberta_feature_dim = self.chemberta_encoder.output_dim
+        # iter6 - DRUG.FUSION picks what the GCN atoms are fused with before the protein BCN.
+        #   chemberta     the baseline: GCN atoms cross-attend to ChemBERTa SMILES tokens.
+        #                 Default, and the block below is byte-for-byte the old code.
+        #   gcn_only      no ChemBERTa: D = LN(GCN). Baseline for unimol_gated.
+        #   unimol_gated  no ChemBERTa: D = z*LN(GCN) + (1-z)*U, U from frozen Uni-Mol
+        #                 per-atom features, z one learned gate value per atom
+        #                 (encoders/unimol_drug.py).
+        # In both new modes D goes straight into the BCN, so the GCN's last width must
+        # already equal the protein width (1280 = DRUG.HIDDEN_LAYERS[-1]).
+        self.drug_fusion = str(config.get("DRUG", {}).get("FUSION", "chemberta")).lower()
+        self.last_drug_gate = None
 
-        self.gcn_proj_for_cross_attn = nn.Linear(self.gcn_feature_dim, self.chemberta_feature_dim)
+        if self.drug_fusion == "chemberta":
+            self.chemberta_encoder = ChemBERTaEncoder(chemberta_model_path, device, use_cache=use_cache)
+            self.chemberta_feature_dim = self.chemberta_encoder.output_dim
 
-        cross_attn_heads = config["BCN"]["HEADS"]
-        cross_attn_dropout = config["BCN"]["DROPOUT"]
-        self.cross_attn_gc = MultiHeadAttentionLayer(input_dim=self.chemberta_feature_dim, num_heads=cross_attn_heads,
-                                                    dropout=cross_attn_dropout, device=device)
+            self.gcn_proj_for_cross_attn = nn.Linear(self.gcn_feature_dim, self.chemberta_feature_dim)
 
-        self.fused_nodes_proj_for_protein_attn = nn.Linear(self.chemberta_feature_dim, self.protein_feature_dim)
+            cross_attn_heads = config["BCN"]["HEADS"]
+            cross_attn_dropout = config["BCN"]["DROPOUT"]
+            self.cross_attn_gc = MultiHeadAttentionLayer(input_dim=self.chemberta_feature_dim, num_heads=cross_attn_heads,
+                                                        dropout=cross_attn_dropout, device=device)
+
+            self.fused_nodes_proj_for_protein_attn = nn.Linear(self.chemberta_feature_dim, self.protein_feature_dim)
+        elif self.drug_fusion in ("gcn_only", "unimol_gated"):
+            if self.gcn_feature_dim != self.protein_feature_dim:
+                raise ValueError(
+                    f"DRUG.FUSION={self.drug_fusion} feeds the drug atoms straight into the "
+                    f"protein cross-attention, so DRUG.HIDDEN_LAYERS[-1] ({self.gcn_feature_dim}) "
+                    f"must equal the protein width ({self.protein_feature_dim})."
+                )
+            self.gcn_out_norm = nn.LayerNorm(self.gcn_feature_dim)
+            if self.drug_fusion == "unimol_gated":
+                from encoders.unimol_drug import UniMolDrugEncoder, GatedAtomFusion
+                drug_cfg = config.get("DRUG", {})
+                unimol_cache_dir = drug_cfg.get("UNIMOL_CACHE_DIR", os.path.join("cache", "unimol_heavy"))
+                if not os.path.isabs(unimol_cache_dir):
+                    unimol_cache_dir = os.path.join(repo_root, unimol_cache_dir)
+                self.unimol_encoder = UniMolDrugEncoder(cache_dir=unimol_cache_dir,
+                                                        max_nodes=max_drug_nodes,
+                                                        missing=str(drug_cfg.get("UNIMOL_MISSING", "error")))
+                self.atom_fusion = GatedAtomFusion(gcn_dim=self.gcn_feature_dim,
+                                                   unimol_dim=self.unimol_encoder.output_dim)
+        else:
+            raise ValueError(
+                f"DRUG.FUSION must be one of chemberta / gcn_only / unimol_gated, got "
+                f"{self.drug_fusion!r}"
+            )
 
         attention_input_dim = self.protein_feature_dim
         ban_heads = config["BCN"]["HEADS"]
@@ -332,18 +369,40 @@ class CMA(nn.Module):
         gcn_node_mask_bool = bg_d.ndata['node_mask'].view(batch_size, max_gcn_nodes, 1).to(self.device)
         gcn_node_mask = gcn_node_mask_bool.to(v_d_graph_nodes.dtype)
 
-        v_d_chembl_tokens, chemberta_mask = self.chemberta_encoder(smiles_sequences)
-        max_seq_len_c = v_d_chembl_tokens.shape[1]
-        chemberta_mask_expanded_bool = chemberta_mask.unsqueeze(1).bool().to(self.device)
+        if self.drug_fusion == "chemberta":
+            v_d_chembl_tokens, chemberta_mask = self.chemberta_encoder(smiles_sequences)
+            max_seq_len_c = v_d_chembl_tokens.shape[1]
+            chemberta_mask_expanded_bool = chemberta_mask.unsqueeze(1).bool().to(self.device)
 
-        v_d_graph_proj = self.gcn_proj_for_cross_attn(v_d_graph_nodes)
-        cross_attn_mask_bool = torch.bmm(gcn_node_mask_bool.float(), chemberta_mask_expanded_bool.float()).bool()
+            v_d_graph_proj = self.gcn_proj_for_cross_attn(v_d_graph_nodes)
+            cross_attn_mask_bool = torch.bmm(gcn_node_mask_bool.float(), chemberta_mask_expanded_bool.float()).bool()
 
-        v_d_fused_nodes, cross_attention_weights = self.cross_attn_gc(
-            v_d_graph_proj, v_d_chembl_tokens, v_d_chembl_tokens, mask=cross_attn_mask_bool.unsqueeze(1)
-        )
+            v_d_fused_nodes, cross_attention_weights = self.cross_attn_gc(
+                v_d_graph_proj, v_d_chembl_tokens, v_d_chembl_tokens, mask=cross_attn_mask_bool.unsqueeze(1)
+            )
 
-        v_d_nodes_proj = self.fused_nodes_proj_for_protein_attn(v_d_fused_nodes)
+            v_d_nodes_proj = self.fused_nodes_proj_for_protein_attn(v_d_fused_nodes)
+        else:
+            # iter6 - gcn_only / unimol_gated: [B, 290, 1280] drug atoms, no ChemBERTa.
+            v_d_nodes_proj = self.gcn_out_norm(v_d_graph_nodes)
+            if self.drug_fusion == "unimol_gated":
+                unimol_feats, unimol_n_atoms = self.unimol_encoder(smiles_sequences)
+                # The Uni-Mol rows must be the GCN's atoms, one for one. The encoder already
+                # checked elements and order against dgllife; this catches anything that
+                # still disagrees on the atom count the dataloader actually built.
+                gcn_n_atoms = gcn_node_mask_bool.view(batch_size, max_gcn_nodes).sum(dim=1).cpu()
+                present = unimol_n_atoms >= 0
+                if not torch.equal(unimol_n_atoms[present], gcn_n_atoms[present]):
+                    bad = [i for i in range(batch_size)
+                           if present[i] and unimol_n_atoms[i] != gcn_n_atoms[i]]
+                    raise ValueError(
+                        f"Uni-Mol / GCN atom count mismatch for "
+                        f"{[(smiles_sequences[i], int(unimol_n_atoms[i]), int(gcn_n_atoms[i])) for i in bad[:5]]}"
+                    )
+                unimol_feats = unimol_feats.to(device=v_d_nodes_proj.device, dtype=v_d_nodes_proj.dtype)
+                v_d_nodes_proj, drug_gate = self.atom_fusion(v_d_nodes_proj, unimol_feats)
+                # kept for analysis only (Trainer saves it on the test pass); never read by forward
+                self.last_drug_gate = (drug_gate.squeeze(-1).detach(), gcn_node_mask_bool.view(batch_size, max_gcn_nodes))
 
         v_p, protein_attention_mask = self.protein_extractor(protein_sequences)
         max_seq_len_p = v_p.shape[1]
